@@ -44,7 +44,7 @@ public:
     AdbStreamSession& operator=(const AdbStreamSession&) = delete;
 
     // Discovers an authorized USB Android device, queries SDK/model + USB link speed,
-    // pushes jcast-server.jar to /data/local/tmp/, establishes `adb forward`, and launches app_process.
+    // pushes tjcap-server.jar to /data/local/tmp/, establishes `adb forward`, and launches app_process.
     bool ConnectAndStart(
         const AdbSessionConfig& cfg,
         ConnectedAndroidInfo& out_device_info,

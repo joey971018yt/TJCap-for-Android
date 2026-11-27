@@ -13,10 +13,10 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 Set-Location -LiteralPath $PSScriptRoot
 
 Write-Host "=============================================================" -ForegroundColor Green
-Write-Host "  JCast for Android 完整移除程式" -ForegroundColor Green
+Write-Host "  TJCap for Android 完整移除程式" -ForegroundColor Green
 Write-Host "=============================================================" -ForegroundColor Green
 
-foreach ($procName in @("JCast for Android", "android_vcam_gui", "android_vcam_host")) {
+foreach ($procName in @("TJCap for Android", "android_vcam_gui", "android_vcam_host")) {
     $p = Get-Process -Name $procName -ErrorAction SilentlyContinue
     if ($p) {
         Stop-Process -Name $procName -Force -ErrorAction SilentlyContinue
@@ -31,5 +31,5 @@ if (Test-Path ".\android_vcam_driver_setup.exe") {
 }
 
 Write-Host ""
-Write-Host "[完成] 已停止內建 ADB 服務、移除 AOA 過濾層並反註冊 JCast for Android 虛擬擷取卡。" -ForegroundColor Green
+Write-Host "[完成] 已停止內建 ADB 服務、移除 AOA 過濾層並反註冊 TJCap for Android 虛擬擷取卡。" -ForegroundColor Green
 Read-Host "按 Enter 鍵關閉視窗"

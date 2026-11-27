@@ -185,7 +185,7 @@ std::filesystem::path AppDir() {
 
 void UnblockDownloadedFiles(const std::filesystem::path& base_dir) {
     const wchar_t* rel_files[] = {
-        L"JCast for Android.exe",
+        L"TJCap for Android.exe",
         L"android_vcam_gui.exe",
         L"android_vcam_dshow.dll",
         L"android_vcam_host.exe",
@@ -196,7 +196,7 @@ void UnblockDownloadedFiles(const std::filesystem::path& base_dir) {
         L"runtime\\adb.exe",
         L"runtime\\AdbWinApi.dll",
         L"runtime\\AdbWinUsbApi.dll",
-        L"runtime\\jcast-server.jar",
+        L"runtime\\tjcap-server.jar",
     };
     for (const wchar_t* rel : rel_files) {
         std::wstring ads = (base_dir / rel).wstring() + L":Zone.Identifier";
@@ -229,7 +229,7 @@ SystemHealth ProbeSystemHealth(const std::filesystem::path& base_dir, bool query
         h.missing_core_files.emplace_back(L"runtime\\adb.exe (+ AdbWinApi.dll / AdbWinUsbApi.dll)");
     }
     if (!h.server_jar_ok) {
-        h.missing_core_files.emplace_back(L"runtime\\jcast-server.jar");
+        h.missing_core_files.emplace_back(L"runtime\\tjcap-server.jar");
     }
 
     wchar_t sys_dir[MAX_PATH] = {0};
@@ -438,7 +438,7 @@ public:
 
     bool RunModal() {
         static bool class_registered = false;
-        const wchar_t* kClsName = L"JCastUpdateModalWndClass";
+        const wchar_t* kClsName = L"TJCapUpdateModalWndClass";
         if (!class_registered) {
             WNDCLASSEXW wc{};
             wc.cbSize = sizeof(wc);
@@ -459,7 +459,7 @@ public:
         int pos_x = prc.left + ((prc.right - prc.left) - dlg_w) / 2;
         int pos_y = prc.top + ((prc.bottom - prc.top) - dlg_h) / 2;
 
-        std::wstring title = L"JCast for Android — 發現新版本 " + Utf8ToWide(info_.latest.tag_name);
+        std::wstring title = L"TJCap for Android — 發現新版本 " + Utf8ToWide(info_.latest.tag_name);
         EnableWindow(parent_, FALSE);
 
         dlg_hwnd_ = CreateWindowExW(
@@ -625,9 +625,9 @@ private:
         wchar_t tmp_buf[MAX_PATH * 2] = {0};
         DWORD n = GetTempPathW(MAX_PATH * 2 - 1, tmp_buf);
         std::filesystem::path tmp_dir = (n > 0) ? std::filesystem::path(tmp_buf) : app_dir_;
-        tmp_dir /= L"JCast_For_Android_Update";
+        tmp_dir /= L"TJCap_For_Android_Update";
         std::filesystem::path safe_leaf = std::filesystem::path(Utf8ToWide(target_asset_.name)).filename();
-        if (safe_leaf.empty()) safe_leaf = use_setup_exe_ ? L"JCast-Update-Setup.exe" : L"JCast-Update-Portable.zip";
+        if (safe_leaf.empty()) safe_leaf = use_setup_exe_ ? L"TJCap-Update-Setup.exe" : L"TJCap-Update-Portable.zip";
         downloaded_file_ = tmp_dir / safe_leaf;
 
         downloading_ = true;
@@ -892,7 +892,7 @@ public:
           on_clear_faults_(std::move(on_clear_faults)) {}
 
     void RunModal() {
-        const wchar_t* kClassName = L"JCastDiagnosticsModalWndClass";
+        const wchar_t* kClassName = L"TJCapDiagnosticsModalWndClass";
         static bool registered = false;
         if (!registered) {
             WNDCLASSEXW wc{};
@@ -922,7 +922,7 @@ public:
         hwnd_ = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             kClassName,
-            L"JCast for Android — 🩺 智慧故障偵測與一鍵診斷報錯中心",
+            L"TJCap for Android — 🩺 智慧故障偵測與一鍵診斷報錯中心",
             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
             pos_x,
             pos_y,
@@ -1025,7 +1025,7 @@ private:
         std::string rpt;
         rpt.reserve(8192);
         rpt += "======================================================================\n";
-        rpt += "  JCast for Android v" ANDROID_VCAM_VER_DISPLAY_STR " — 系統環境自檢與故障診斷報錯單\n";
+        rpt += "  TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_STR " — 系統環境自檢與故障診斷報錯單\n";
         rpt += "======================================================================\n\n";
 
         rpt += "【一、8 項系統環境與硬體全面自檢】\n";
@@ -1039,23 +1039,23 @@ private:
                 if (i > 0) rpt += ", ";
                 rpt += WideToUtf8Str(h.missing_core_files[i]);
             }
-            rpt += " (JCAST-E101)\n";
+            rpt += " (TJCAP-E101)\n";
         }
         rpt += std::string("4. 系統 H.264 元件: ") +
                (h.mf_h264_ok ? "[PASS] Windows Media Foundation (mfplat / msmpeg2vdec) 正常\n"
-                             : "[FAIL] 缺少 Media Feature Pack H.264 解碼元件 (JCAST-E103)\n");
+                             : "[FAIL] 缺少 Media Feature Pack H.264 解碼元件 (TJCAP-E103)\n");
         rpt += std::string("5. 內建 ADB 引擎  : ") +
                (h.adb_runtime_ok ? "[PASS] 內建免安裝 WinUSB ADB 通訊套件完整\n"
-                                 : "[FAIL] 缺少 runtime\\adb.exe 元件 (JCAST-E101)\n");
+                                 : "[FAIL] 缺少 runtime\\adb.exe 元件 (TJCAP-E101)\n");
         rpt += std::string("6. 手機端微服務包: ") +
-               (h.server_jar_ok ? "[PASS] 內建免裝 APK 硬體編碼微服務 (jcast-server.jar) 完整\n"
-                                : "[FAIL] 缺少 runtime\\jcast-server.jar (JCAST-E101)\n");
+               (h.server_jar_ok ? "[PASS] 內建免裝 APK 硬體編碼微服務 (tjcap-server.jar) 完整\n"
+                                : "[FAIL] 缺少 runtime\\tjcap-server.jar (TJCAP-E101)\n");
         if (h.dshow == DshowRegState::Ready) {
-            rpt += "7. DirectShow 鏡頭: [PASS] JCast for Android (Video/Audio) 註冊正常\n";
+            rpt += "7. DirectShow 鏡頭: [PASS] TJCap for Android (Video/Audio) 註冊正常\n";
         } else if (h.dshow == DshowRegState::PathMismatch) {
-            rpt += "7. DirectShow 鏡頭: [WARN] 資料夾路徑已變更，需重新註冊 (JCAST-E104)\n";
+            rpt += "7. DirectShow 鏡頭: [WARN] 資料夾路徑已變更，需重新註冊 (TJCAP-E104)\n";
         } else {
-            rpt += "7. DirectShow 鏡頭: [WARN] 尚未註冊虛擬擷取卡 (JCAST-E104)\n";
+            rpt += "7. DirectShow 鏡頭: [WARN] 尚未註冊虛擬擷取卡 (TJCAP-E104)\n";
         }
 
         switch (h.android_usb) {
@@ -1064,13 +1064,13 @@ private:
                        std::string(UsbLinkSpeedName(usb_speed_)) + ")\n";
                 break;
             case AndroidUsbState::PluggedUnauthorized:
-                rpt += "8. Android USB-C : [WARN] 已插入手機，等待在手機螢幕點擊「允許 USB 偵錯」 (JCAST-E301)\n";
+                rpt += "8. Android USB-C : [WARN] 已插入手機，等待在手機螢幕點擊「允許 USB 偵錯」 (TJCAP-E301)\n";
                 break;
             case AndroidUsbState::PluggedNoUsbDebug:
-                rpt += "8. Android USB-C : [WARN] 已偵測 USB 連線，但手機尚未開啟「開發者選項 -> USB 偵錯」 (JCAST-E201)\n";
+                rpt += "8. Android USB-C : [WARN] 已偵測 USB 連線，但手機尚未開啟「開發者選項 -> USB 偵錯」 (TJCAP-E201)\n";
                 break;
             case AndroidUsbState::PluggedOffline:
-                rpt += "8. Android USB-C : [WARN] ADB 裝置處於離線狀態，建議重插傳輸線 (JCAST-E204)\n";
+                rpt += "8. Android USB-C : [WARN] ADB 裝置處於離線狀態，建議重插傳輸線 (TJCAP-E204)\n";
                 break;
             case AndroidUsbState::Unplugged:
                 rpt += "8. Android USB-C : [INFO] 目前尚未插入 Android 手機 / 平板 USB-C\n";
@@ -1277,7 +1277,7 @@ private:
         std::swprintf(
             fname,
             96,
-            L"JCast_DiagReport_%04u%02u%02u_%02u%02u%02u.txt",
+            L"TJCap_DiagReport_%04u%02u%02u_%02u%02u%02u.txt",
             st.wYear,
             st.wMonth,
             st.wDay,
@@ -1639,7 +1639,7 @@ public:
             return;
         }
 
-        const wchar_t* kCls = L"JCastLiveMonitorWndClass";
+        const wchar_t* kCls = L"TJCapLiveMonitorWndClass";
         if (!dark_bg_brush_) {
             dark_bg_brush_ = CreateSolidBrush(RGB(10, 12, 16));
         }
@@ -1694,7 +1694,7 @@ public:
         hwnd_ = CreateWindowExW(
             0,
             kCls,
-            L"JCast Live Monitor — 獨立外接螢幕視窗 [雙擊 / F11: 全螢幕 ｜ F12: 原畫質截圖 ｜ 右鍵: 選單]",
+            L"TJCap Live Monitor — 獨立外接螢幕視窗 [雙擊 / F11: 全螢幕 ｜ F12: 原畫質截圖 ｜ 右鍵: 選單]",
             style,
             pos_x,
             pos_y,
@@ -1739,7 +1739,7 @@ private:
 
     void UpdateTitleBar() {
         if (!hwnd_ || fullscreen_) return;
-        std::wstring t = L"JCast Live Monitor";
+        std::wstring t = L"TJCap Live Monitor";
         if (has_live_frame_ && src_w_ > 0 && src_h_ > 0) {
             t += L" (" + std::to_wstring(src_w_) + L"×" + std::to_wstring(src_h_) + L")";
         }
@@ -2163,7 +2163,7 @@ public:
         wc.hIconSm = icon_small_ ? icon_small_ : wc.hIcon;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"JCastForAndroidGuiWndClass";
+        wc.lpszClassName = L"TJCapForAndroidGuiWndClass";
         RegisterClassExW(&wc);
 
         RECT work{};
@@ -2178,7 +2178,7 @@ public:
         hwnd_ = CreateWindowExW(
             0,
             wc.lpszClassName,
-            L"JCast for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR L" — 智慧擷取控制台 (故障偵測報錯 × 健康度儀表板 × 即時預覽)",
+            L"TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR L" — 智慧擷取控制台 (故障偵測報錯 × 健康度儀表板 × 即時預覽)",
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             pos_x, pos_y, win_w, win_h,
             nullptr, nullptr, hInst, this);
@@ -2289,7 +2289,7 @@ private:
         SendMessageW(combo_conn_mode_, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(L"⚡ 免裝手機 App 直連（推薦：透過「USB 偵錯」，免裝 APK、全系統內錄）"));
         SendMessageW(combo_conn_mode_, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"🛡️ 免開 USB 偵錯備援（手機安裝 JCast Companion APK + USB AOA 配件直連）"));
+                     reinterpret_cast<LPARAM>(L"🛡️ 免開 USB 偵錯備援（手機安裝 TJCap Companion APK + USB AOA 配件直連）"));
         SendMessageW(combo_conn_mode_, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(L"🔄 智慧雙模自動切換（優先 ADB 直連，未開 USB 偵錯時自動切換 AOA）"));
         SendMessageW(combo_conn_mode_, CB_SETCURSEL, 0, 0);
@@ -2529,7 +2529,7 @@ private:
             [this]() { OpenScreenshotsFolder(); });
 
         AppendLogLine(
-            L"[歡迎] 歡迎使用 JCast for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR
+            L"[歡迎] 歡迎使用 TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR
             L"！新增「🩺 智慧故障偵測與一鍵診斷報錯中心（含自動軟解自癒、隱私脫敏與 GitHub 回報）」！");
         RefreshHealthAndUi(true);
         TickTelemetryDashboard(true);
@@ -2687,7 +2687,7 @@ private:
         audio_endpoint_matches_.push_back(L"__AUTO__");
 
         SendMessageW(combo_audio_, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"僅輸出至 OBS「JCast for Android (Audio)」（不在電腦喇叭播放）"));
+                     reinterpret_cast<LPARAM>(L"僅輸出至 OBS「TJCap for Android (Audio)」（不在電腦喇叭播放）"));
         audio_endpoint_matches_.push_back(L"__NONE__");
 
         auto eps = WasapiAudioRouter::EnumerateRenderEndpoints();
@@ -2781,7 +2781,7 @@ private:
             bool needs_setup = (health_.dshow != DshowRegState::Ready);
             if (needs_setup) {
                 SetWindowTextW(btn_smart_start_,
-                               L"🚀 智慧一鍵啟動（自動註冊 JCast for Android 虛擬擷取卡 ➔ 開始投影）");
+                               L"🚀 智慧一鍵啟動（自動註冊 TJCap for Android 虛擬擷取卡 ➔ 開始投影）");
             } else {
                 SetWindowTextW(btn_smart_start_, L"▶ 開始 Android USB-C 有線投影擷取（免 Root · 免裝手機 App）");
             }
@@ -2809,7 +2809,7 @@ private:
         HGDIOBJ old_bmp = SelectObject(mem_dc, mem_bmp);
 
         bool running = host_running_.load(std::memory_order_acquire);
-        // Emerald Green JCast for Android theme!
+        // Emerald Green TJCap for Android theme!
         COLORREF bg_color = RGB(235, 249, 241);
         COLORREF accent_color = RGB(16, 136, 78);
         std::wstring headline;
@@ -2818,8 +2818,8 @@ private:
             bg_color = RGB(224, 248, 234);
             accent_color = RGB(12, 146, 74);
             headline = running_mock_
-                           ? L"🟢 JCast for Android 正在輸出自測動態彩條與 48kHz 測試音（請開啟 OBS 預覽）"
-                           : L"🟢 JCast for Android 有線投影執行中（已鎖定所選解析度 + 48kHz 系統內錄音訊）";
+                           ? L"🟢 TJCap for Android 正在輸出自測動態彩條與 48kHz 測試音（請開啟 OBS 預覽）"
+                           : L"🟢 TJCap for Android 有線投影執行中（已鎖定所選解析度 + 48kHz 系統內錄音訊）";
         } else if (health_.android_usb == AndroidUsbState::PluggedUnauthorized) {
             bg_color = RGB(255, 248, 232);
             accent_color = RGB(180, 105, 14);
@@ -2839,7 +2839,7 @@ private:
         } else {
             bg_color = RGB(238, 248, 242);
             accent_color = RGB(20, 132, 76);
-            headline = L"🔌 JCast for Android 已就緒 — 插上已開「USB 偵錯」的手機/平板自動辨識速率";
+            headline = L"🔌 TJCap for Android 已就緒 — 插上已開「USB 偵錯」的手機/平板自動辨識速率";
         }
 
         RECT local_rc{0, 0, w, h};
@@ -2880,11 +2880,11 @@ private:
 
         std::wstring dshow_txt;
         if (health_.dshow == DshowRegState::Ready) {
-            dshow_txt = L"• DirectShow 虛擬擷取卡 (JCast for Android)：✅ 已安裝";
+            dshow_txt = L"• DirectShow 虛擬擷取卡 (TJCap for Android)：✅ 已安裝";
         } else if (health_.dshow == DshowRegState::PathMismatch) {
-            dshow_txt = L"• DirectShow 虛擬擷取卡 (JCast for Android)：⚠️ 資料夾已移動（點一鍵啟動自動更新）";
+            dshow_txt = L"• DirectShow 虛擬擷取卡 (TJCap for Android)：⚠️ 資料夾已移動（點一鍵啟動自動更新）";
         } else {
-            dshow_txt = L"• DirectShow 虛擬擷取卡 (JCast for Android)：⏳ 尚未註冊（點一鍵啟動自動完成）";
+            dshow_txt = L"• DirectShow 虛擬擷取卡 (TJCap for Android)：⏳ 尚未註冊（點一鍵啟動自動完成）";
         }
 
         std::wstring usb_drv_txt = (health_.adb_runtime_ok && health_.server_jar_ok)
@@ -2939,7 +2939,7 @@ private:
         std::filesystem::path exe = base_dir_ / L"android_vcam_driver_setup.exe";
         if (!std::filesystem::exists(exe)) {
             AppendLogLine(L"[錯誤] 找不到 android_vcam_driver_setup.exe，請確認程式資料夾檔案完整！");
-            MessageBoxW(hwnd_, L"找不到 android_vcam_driver_setup.exe，請確認完整安裝或解壓縮 JCast for Android 資料夾！",
+            MessageBoxW(hwnd_, L"找不到 android_vcam_driver_setup.exe，請確認完整安裝或解壓縮 TJCap for Android 資料夾！",
                         L"缺少檔案", MB_ICONERROR | MB_OK);
             return false;
         }
@@ -2979,7 +2979,7 @@ private:
             CloseHandle(sei.hProcess);
             RefreshHealthAndUi(true);
             if (exit_code == 0) {
-                AppendLogLine(L"[成功] JCast for Android 虛擬擷取卡與內建 ADB 服務設定完成！");
+                AppendLogLine(L"[成功] TJCap for Android 虛擬擷取卡與內建 ADB 服務設定完成！");
                 return true;
             }
             AppendLogLine(L"[提醒] 設定程式回傳代碼 " + std::to_wstring(exit_code) + L"，請確認檔案完整或重試。");
@@ -3249,8 +3249,8 @@ private:
         RefreshHealthAndUi(false);
         TickTelemetryDashboard(true);
 
-        AppendLogLine(mock_mode ? L"=== 已啟動 JCast 免手機自測模式（彩條 + 48kHz 測試音） ==="
-                                : (L"=== 已啟動 JCast 有線投影｜本次鎖定選項：" + chosen_res_label + L" ==="));
+        AppendLogLine(mock_mode ? L"=== 已啟動 TJCap 免手機自測模式（彩條 + 48kHz 測試音） ==="
+                                : (L"=== 已啟動 TJCap 有線投影｜本次鎖定選項：" + chosen_res_label + L" ==="));
 
         if (log_reader_thread_.joinable()) {
             log_reader_thread_.join();
@@ -3337,13 +3337,13 @@ private:
     }
 
     void OpenCompanionApkFolder() {
-        std::filesystem::path apk_file = base_dir_ / L"companion" / L"JCast-Companion-v1.0.0.apk";
+        std::filesystem::path apk_file = base_dir_ / L"companion" / L"TJCap-Companion-v1.0.0.apk";
         std::filesystem::path apk_dir = base_dir_ / L"companion";
         std::error_code ec;
         if (std::filesystem::exists(apk_file, ec)) {
             std::wstring param = L"/select,\"" + apk_file.wstring() + L"\"";
             ShellExecuteW(hwnd_, L"open", L"explorer.exe", param.c_str(), nullptr, SW_SHOWNORMAL);
-            AppendLogLine(L"[Companion APK] 已開啟 companion 資料夾，請將 JCast-Companion-v1.0.0.apk 傳至手機安裝（免開 USB 偵錯即可透過 AOA 配件直連）！");
+            AppendLogLine(L"[Companion APK] 已開啟 companion 資料夾，請將 TJCap-Companion-v1.0.0.apk 傳至手機安裝（免開 USB 偵錯即可透過 AOA 配件直連）！");
         } else {
             ShellExecuteW(hwnd_, L"open", base_dir_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             AppendLogLine(L"[提醒] 未在 companion 資料夾找到 APK，請確認已完整解壓縮發行套件。");
@@ -3352,9 +3352,9 @@ private:
 
     void ShowAndCopyObsGuide() {
         const wchar_t* guide =
-            L"【備援方案：🛡️ 免開 USB 偵錯模式（JCast Companion APK + USB AOA）】\r\n"
+            L"【備援方案：🛡️ 免開 USB 偵錯模式（TJCap Companion APK + USB AOA）】\r\n"
             L"• 適用情境：禁止開啟「開發者選項／USB 偵錯」的手遊或公司設備！\r\n"
-            L"• 步驟：點擊主視窗「📲 取得 APK」將 JCast-Companion-v1.0.0.apk 傳到手機安裝 ➔ 連線模式選「🛡️ 免開 USB 偵錯備援 (AOA)」點啟動 ➔ 手機自動喚醒 App 後點「開始錄製」即可！\r\n\r\n"
+            L"• 步驟：點擊主視窗「📲 取得 APK」將 TJCap-Companion-v1.0.0.apk 傳到手機安裝 ➔ 連線模式選「🛡️ 免開 USB 偵錯備援 (AOA)」點啟動 ➔ 手機自動喚醒 App 後點「開始錄製」即可！\r\n\r\n"
             L"【預設推薦：⚡ 免裝手機 App 直連（「USB 偵錯」一次性設定）】\r\n"
             L"1. 開啟手機「設定 ➔ 關於手機」（小米為「我的裝置」，三星為「關於手機 ➔ 軟體資訊」）\r\n"
             L"2. 連續點擊 7 下「版本號碼」（小米為「OS 版本」）直到提示「已成為開發人員」\r\n"
@@ -3365,14 +3365,14 @@ private:
             L"【二、OBS Studio / Discord / Zoom 滿版自適應設定步驟】\r\n"
             L"1. 先在本程式點擊「🚀 智慧一鍵啟動」\r\n"
             L"   💡 若只想把電腦當外接大螢幕，直接點右下角「🖥 獨立大視窗」（F11 無邊框全螢幕、F12 原畫質截圖），免開 OBS！\r\n"
-            L"2. 開啟 OBS Studio ➔ 新增「視訊擷取裝置」➔ 選擇：JCast for Android (Video)\r\n"
+            L"2. 開啟 OBS Studio ➔ 新增「視訊擷取裝置」➔ 選擇：TJCap for Android (Video)\r\n"
             L"3.「解析度/FPS 類型」保持「裝置預設值」：OBS 自動抓滿版原生比例、零黑邊！\r\n"
-            L"4. 往下捲動勾選「使用自訂音訊裝置」➔ 選擇：JCast for Android (Audio)（支援 Android 11+ 原生系統內錄立體聲！）\r\n\r\n"
-            L"（裝置名稱已複製到剪貼簿：JCast for Android (Video)）";
+            L"4. 往下捲動勾選「使用自訂音訊裝置」➔ 選擇：TJCap for Android (Audio)（支援 Android 11+ 原生系統內錄立體聲！）\r\n\r\n"
+            L"（裝置名稱已複製到剪貼簿：TJCap for Android (Video)）";
 
-        CopyWideTextToClipboard(hwnd_, L"JCast for Android (Video)");
-        AppendLogLine(L"[教學] 已將 'JCast for Android (Video)' 複製到剪貼簿，並顯示 USB 偵錯與 OBS 設定教學。");
-        MessageBoxW(hwnd_, guide, L"JCast for Android — USB 偵錯與 OBS 直播教學", MB_ICONINFORMATION | MB_OK);
+        CopyWideTextToClipboard(hwnd_, L"TJCap for Android (Video)");
+        AppendLogLine(L"[教學] 已將 'TJCap for Android (Video)' 複製到剪貼簿，並顯示 USB 偵錯與 OBS 設定教學。");
+        MessageBoxW(hwnd_, guide, L"TJCap for Android — USB 偵錯與 OBS 直播教學", MB_ICONINFORMATION | MB_OK);
     }
 
     void OpenUpdateDialog(const UpdateCheckResult& info) {
@@ -3474,7 +3474,7 @@ private:
 
             if (manual_trigger) {
                 std::wstring msg =
-                    L"您目前使用的 JCast for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR L" 已是最新版本！\r\n\r\n"
+                    L"您目前使用的 TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR L" 已是最新版本！\r\n\r\n"
                     L"• GitHub 最新版本：" + Utf8ToWide(res.latest.tag_name) + L"\r\n" +
                     (res.latest.published_at.empty()
                          ? L""
@@ -3491,7 +3491,7 @@ private:
         SetWindowTextW(btn_update_, up_lbl.c_str());
         InvalidateRect(hwnd_, &banner_rect_, FALSE);
         AppendLogLine(
-            L"[發現新版本] 🎉 GitHub 已發布 JCast for Android " + Utf8ToWide(res.latest.tag_name) +
+            L"[發現新版本] 🎉 GitHub 已發布 TJCap for Android " + Utf8ToWide(res.latest.tag_name) +
             L"！點擊「" + up_lbl + L"」即可檢視更新日誌並一鍵自動升級。");
 
         if (manual_trigger && !host_running_.load(std::memory_order_acquire)) {
@@ -4163,7 +4163,7 @@ private:
                     if (id == kIdBtnUninstall) {
                         if (MessageBoxW(
                                 hwnd_,
-                                L"確定要停止內建 ADB 服務並反註冊 JCast for Android 虛擬擷取卡嗎？",
+                                L"確定要停止內建 ADB 服務並反註冊 TJCap for Android 虛擬擷取卡嗎？",
                                 L"確認解除安裝",
                                 MB_ICONQUESTION | MB_YESNO) == IDYES) {
                             if (host_running_.load(std::memory_order_acquire)) {

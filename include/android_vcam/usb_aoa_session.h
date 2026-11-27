@@ -14,12 +14,12 @@
 namespace android_vcam {
 
 // Android Open Accessory (AOA v1/v2) USB identity matching companion-apk/app/src/main/res/xml/accessory_filter.xml
-inline constexpr const char* kAoaManufacturer = "JCast Project";
-inline constexpr const char* kAoaModel        = "JCast for Android";
-inline constexpr const char* kAoaDescription  = "JCast USB-C Virtual Capture Card";
+inline constexpr const char* kAoaManufacturer = "TJCap Project";
+inline constexpr const char* kAoaModel        = "TJCap for Android";
+inline constexpr const char* kAoaDescription  = "TJCap USB-C Virtual Capture Card";
 inline constexpr const char* kAoaVersion      = "1.0";
-inline constexpr const char* kAoaUri          = "https://github.com/joey971018yt/android-usb-vcam";
-inline constexpr const char* kAoaSerial       = "JCAST-AOA-001";
+inline constexpr const char* kAoaUri          = "https://github.com/joey971018yt/TJCap-for-Android";
+inline constexpr const char* kAoaSerial       = "TJCAP-AOA-001";
 
 struct UsbAoaSessionConfig {
     std::filesystem::path base_dir;
@@ -44,7 +44,7 @@ public:
 
     // Loads libusb-1.0.dll, switches any attached Android phone into Google AOA Accessory Mode
     // (0x18D1:0x2D00 / 0x2D01) via control requests 51/52/53 if needed, claims Bulk endpoints,
-    // and sends the 24-byte JCAO START_STREAM configuration frame to JCast Companion APK.
+    // and sends the 24-byte JCAO START_STREAM configuration frame to TJCap Companion APK.
     bool OpenAndNegotiateAoa(
         const UsbAoaSessionConfig& cfg,
         ConnectedAndroidInfo& out_device_info,

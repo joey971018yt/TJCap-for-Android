@@ -11,6 +11,6 @@
 #define ANDROID_VCAM_VER_DISPLAY_WSTR L"1.0.0"
 
 #define ANDROID_VCAM_GITHUB_OWNER     "joey971018yt"
-#define ANDROID_VCAM_GITHUB_REPO      "android-usb-vcam"
+#define ANDROID_VCAM_GITHUB_REPO      "TJCap-for-Android"
 #define ANDROID_VCAM_GITHUB_OWNER_W   L"joey971018yt"
-#define ANDROID_VCAM_GITHUB_REPO_W    L"android-usb-vcam"
+#define ANDROID_VCAM_GITHUB_REPO_W    L"TJCap-for-Android"

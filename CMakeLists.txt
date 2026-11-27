@@ -142,7 +142,7 @@ if(WIN32)
         target_link_options(android_vcam_driver_setup PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
 
-    # 4. One-Click Green-Themed Graphical App (android_vcam_gui.exe / JCast for Android.exe)
+    # 4. One-Click Green-Themed Graphical App (android_vcam_gui.exe / TJCap for Android.exe)
     set(ANDROID_VCAM_GUI_EXTRA_SRCS src/gui/android_vcam_gui.rc)
     if(MSVC)
         list(APPEND ANDROID_VCAM_GUI_EXTRA_SRCS src/gui/android_vcam_gui.manifest)

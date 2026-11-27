@@ -73,21 +73,21 @@ find "$WORK_DIR/classes" -name "*.class" > "$WORK_DIR/classes.txt"
 "$BUILD_TOOLS/zipalign" -f -p 4 "$WORK_DIR/unaligned.apk" "$WORK_DIR/aligned.apk"
 
 # 5. Sign APK (v1 + v2 + v3 schemes for universal Android 8..16 installation)
-KEYSTORE="$WORK_DIR/jcast_release.jks"
+KEYSTORE="$WORK_DIR/tjcap_release.jks"
 keytool -genkeypair -v \
     -keystore "$KEYSTORE" \
-    -storepass "jcast2026" \
-    -keypass "jcast2026" \
-    -alias "jcast_companion" \
+    -storepass "tjcap2026" \
+    -keypass "tjcap2026" \
+    -alias "tjcap_companion" \
     -keyalg RSA -keysize 2048 -validity 10000 \
-    -dname "CN=JCast for Android, OU=JCast Project, O=JCast, L=Taipei, ST=Taiwan, C=TW" >/dev/null 2>&1
+    -dname "CN=TJCap for Android, OU=TJCap Project, O=TJCap, L=Taipei, ST=Taiwan, C=TW" >/dev/null 2>&1
 
-OUT_APK="$REPO_ROOT/companion/JCast-Companion-v1.0.0.apk"
+OUT_APK="$REPO_ROOT/companion/TJCap-Companion-v1.0.0.apk"
 "$BUILD_TOOLS/apksigner" sign \
     --ks "$KEYSTORE" \
-    --ks-key-alias "jcast_companion" \
-    --ks-pass pass:jcast2026 \
-    --key-pass pass:jcast2026 \
+    --ks-key-alias "tjcap_companion" \
+    --ks-pass pass:tjcap2026 \
+    --key-pass pass:tjcap2026 \
     --v1-signing-enabled true \
     --v2-signing-enabled true \
     --v3-signing-enabled true \

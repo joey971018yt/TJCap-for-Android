@@ -24,11 +24,11 @@ inline constexpr uint64_t kScrcpyPtsMask            = (1ULL << 61) - 1ULL;
 
 inline constexpr size_t kScrcpyMaxPacketBytes = 16U * 1024U * 1024U;  // 16 MB sanity guard
 
-// Exact JCast Companion APK (USB AOA v2) multiplexed wire constants ('JCAO')
-inline constexpr uint32_t kJCastAoaMagic = 0x4A43414FU;  // 'JCAO'
-inline constexpr uint8_t kJCastAoaVersion = 1U;
-inline constexpr size_t kJCastAoaCtrlFrameBytes = 24U;
-inline constexpr size_t kJCastAoaStreamHeaderBytes = 20U;
+// Exact TJCap Companion APK (USB AOA v2) multiplexed wire constants ('JCAO')
+inline constexpr uint32_t kTJCapAoaMagic = 0x4A43414FU;  // 'JCAO'
+inline constexpr uint8_t kTJCapAoaVersion = 1U;
+inline constexpr size_t kTJCapAoaCtrlFrameBytes = 24U;
+inline constexpr size_t kTJCapAoaStreamHeaderBytes = 20U;
 
 inline constexpr uint8_t kAoaCmdStartStream = 0x01U;
 inline constexpr uint8_t kAoaCmdStopStream  = 0x02U;
@@ -151,15 +151,15 @@ private:
     uint64_t packets_parsed_ = 0;
 };
 
-// Incremental multiplexed byte-stream parser for JCast Companion APK over USB AOA Bulk IN ('JCAO')
-class JCastAoaStreamParser {
+// Incremental multiplexed byte-stream parser for TJCap Companion APK over USB AOA Bulk IN ('JCAO')
+class TJCapAoaStreamParser {
 public:
     using OnDeviceHelloFn = std::function<void(const std::string& model, int sdk_int, uint32_t w, uint32_t h)>;
     using OnVideoPacketFn = std::function<void(const AndroidEncodedVideoPacket&)>;
     using OnAudioPacketFn = std::function<void(const AndroidPcmAudioPacket&)>;
     using OnAudioDisabledFn = std::function<void(int sdk_int)>;
 
-    JCastAoaStreamParser(
+    TJCapAoaStreamParser(
         OnDeviceHelloFn on_hello = {},
         OnVideoPacketFn on_video = {},
         OnAudioPacketFn on_audio = {},
@@ -219,7 +219,7 @@ std::vector<uint8_t> BuildScrcpyFramePacket(
     bool is_config,
     bool is_keyframe);
 
-std::vector<uint8_t> BuildJCastAoaControlFrame(
+std::vector<uint8_t> BuildTJCapAoaControlFrame(
     uint8_t cmd,
     uint16_t max_fps,
     uint32_t max_dim,
@@ -227,7 +227,7 @@ std::vector<uint8_t> BuildJCastAoaControlFrame(
     bool enable_audio,
     bool lock_orientation);
 
-std::vector<uint8_t> BuildJCastAoaStreamPacket(
+std::vector<uint8_t> BuildTJCapAoaStreamPacket(
     uint8_t pkt_type,
     uint64_t pts_us_or_meta,
     std::span<const uint8_t> payload);

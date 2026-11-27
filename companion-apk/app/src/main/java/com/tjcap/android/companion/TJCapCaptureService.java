@@ -1,4 +1,4 @@
-package com.jcast.android.companion;
+package com.tjcap.android.companion;
 
 import android.app.Activity;
 import android.app.Notification;
@@ -37,11 +37,11 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public final class JCastCaptureService extends Service {
+public final class TJCapCaptureService extends Service {
 
-    public static final String ACTION_START = "com.jcast.android.companion.ACTION_START";
-    public static final String ACTION_STOP  = "com.jcast.android.companion.ACTION_STOP";
-    public static final String ACTION_STATE_BROADCAST = "com.jcast.android.companion.STATE";
+    public static final String ACTION_START = "com.tjcap.android.companion.ACTION_START";
+    public static final String ACTION_STOP  = "com.tjcap.android.companion.ACTION_STOP";
+    public static final String ACTION_STATE_BROADCAST = "com.tjcap.android.companion.STATE";
 
     public static final String EXTRA_RESULT_CODE  = "result_code";
     public static final String EXTRA_RESULT_DATA  = "result_data";
@@ -49,7 +49,7 @@ public final class JCastCaptureService extends Service {
     public static final String EXTRA_MAX_DIM      = "max_dim";
     public static final String EXTRA_MAX_FPS      = "max_fps";
 
-    private static final String CHANNEL_ID = "jcast_usb_capture";
+    private static final String CHANNEL_ID = "tjcap_usb_capture";
     private static final int NOTIF_ID = 2026;
 
     private static volatile boolean sRunning = false;
@@ -119,13 +119,13 @@ public final class JCastCaptureService extends Service {
         if (Build.VERSION.SDK_INT >= 26 && nm != null) {
             NotificationChannel ch = new NotificationChannel(
                     CHANNEL_ID,
-                    "JCast USB-C 螢幕擷取服務",
+                    "TJCap USB-C 螢幕擷取服務",
                     NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("透過 USB-C AOA 配件通道將畫面低延遲傳送至電腦 JCast for Android");
+            ch.setDescription("透過 USB-C AOA 配件通道將畫面低延遲傳送至電腦 TJCap for Android");
             nm.createNotificationChannel(ch);
         }
 
-        Intent stopIntent = new Intent(this, JCastCaptureService.class);
+        Intent stopIntent = new Intent(this, TJCapCaptureService.class);
         stopIntent.setAction(ACTION_STOP);
         PendingIntent stopPi = PendingIntent.getService(
                 this,
@@ -145,7 +145,7 @@ public final class JCastCaptureService extends Service {
                 : new Notification.Builder(this);
 
         nb.setSmallIcon(android.R.drawable.presence_video_online)
-                .setContentTitle("JCast for Android 正在透過 USB-C 直播畫面")
+                .setContentTitle("TJCap for Android 正在透過 USB-C 直播畫面")
                 .setContentText("免開 USB 偵錯 · AOA 高速配件直連運作中")
                 .setContentIntent(openPi)
                 .setOngoing(true)
@@ -172,7 +172,7 @@ public final class JCastCaptureService extends Service {
         UsbManager usbMgr = (UsbManager) getSystemService(Context.USB_SERVICE);
         UsbAccessory[] accList = (usbMgr != null) ? usbMgr.getAccessoryList() : null;
         if (accList == null || accList.length == 0) {
-            stopSelfCleanly("尚未偵測到電腦端 JCast AOA 配件通道（請先在電腦點擊啟動）");
+            stopSelfCleanly("尚未偵測到電腦端 TJCap AOA 配件通道（請先在電腦點擊啟動）");
             return;
         }
 
@@ -239,7 +239,7 @@ public final class JCastCaptureService extends Service {
                 }
             } catch (IOException ignored) {
             }
-        }, "jcast-aoa-ctrl");
+        }, "tjcap-aoa-ctrl");
         controlThread.start();
 
         videoThread = new Thread(() -> {
@@ -258,7 +258,7 @@ public final class JCastCaptureService extends Service {
                     stopSelfCleanly("USB 傳輸中斷：" + t.getMessage());
                 }
             }
-        }, "jcast-aoa-video");
+        }, "tjcap-aoa-video");
         videoThread.start();
     }
 
@@ -333,7 +333,7 @@ public final class JCastCaptureService extends Service {
         videoEncoder.start();
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
-                "JCastUsbDisplay",
+                "TJCapUsbDisplay",
                 encW,
                 encH,
                 dpi,
@@ -486,7 +486,7 @@ public final class JCastCaptureService extends Service {
                     recorder.release();
                 }
             }
-        }, "jcast-aoa-audio");
+        }, "tjcap-aoa-audio");
         audioThread.start();
     }
 

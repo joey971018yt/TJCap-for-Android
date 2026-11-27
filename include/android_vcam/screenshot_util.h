@@ -6,10 +6,10 @@
 
 namespace android_vcam {
 
-// Resolves "%USERPROFILE%\Pictures\JCast Screenshots" (creates directory if needed), falling back to app_dir\Screenshots
+// Resolves "%USERPROFILE%\Pictures\TJCap Screenshots" (creates directory if needed), falling back to app_dir\Screenshots
 std::filesystem::path GetDefaultScreenshotDirectory(const std::filesystem::path& fallback_app_dir);
 
-// Builds a collision-free millisecond-timestamped PNG filename, e.g. "JCast_Android_20261127_213015_128_3120x1440.png"
+// Builds a collision-free millisecond-timestamped PNG filename, e.g. "TJCap_Android_20261127_213015_128_3120x1440.png"
 std::filesystem::path BuildTimestampedScreenshotPath(
     const std::filesystem::path& dir,
     uint32_t width,

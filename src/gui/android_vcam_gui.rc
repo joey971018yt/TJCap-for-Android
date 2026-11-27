@@ -20,13 +20,13 @@ BEGIN
     BEGIN
         BLOCK "040404b0"
         BEGIN
-            VALUE "CompanyName", "JCast Project"
-            VALUE "FileDescription", "JCast for Android (USB Speed Adaptive 2K+ Capture App)"
+            VALUE "CompanyName", "TJCap Project"
+            VALUE "FileDescription", "TJCap for Android (USB Speed Adaptive 2K+ Capture App)"
             VALUE "FileVersion", ANDROID_VCAM_VER_STR
-            VALUE "InternalName", "JCastForAndroid"
-            VALUE "LegalCopyright", "Copyright (C) 2026 JCast Project"
-            VALUE "OriginalFilename", "JCast for Android.exe"
-            VALUE "ProductName", "JCast for Android"
+            VALUE "InternalName", "TJCapForAndroid"
+            VALUE "LegalCopyright", "Copyright (C) 2026 TJCap Project"
+            VALUE "OriginalFilename", "TJCap for Android.exe"
+            VALUE "ProductName", "TJCap for Android"
             VALUE "ProductVersion", ANDROID_VCAM_VER_STR
         END
     END

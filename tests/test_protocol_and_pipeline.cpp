@@ -113,11 +113,11 @@ void TestScrcpyAudioStreamParser() {
     TEST_CHECK(aparser.IsDisabledByDevice());
 }
 
-void TestJCastAoaCompanionWireParser() {
-    std::cout << "[Test 3] JCast Companion APK + USB AOA ('JCAO') multiplexed AV wire parser...\n";
+void TestTJCapAoaCompanionWireParser() {
+    std::cout << "[Test 3] TJCap Companion APK + USB AOA ('JCAO') multiplexed AV wire parser...\n";
 
-    auto ctrl = BuildJCastAoaControlFrame(kAoaCmdStartStream, 120, 2560, 24000000, true, true);
-    TEST_CHECK(ctrl.size() == kJCastAoaCtrlFrameBytes);
+    auto ctrl = BuildTJCapAoaControlFrame(kAoaCmdStartStream, 120, 2560, 24000000, true, true);
+    TEST_CHECK(ctrl.size() == kTJCapAoaCtrlFrameBytes);
     TEST_CHECK(ctrl[0] == 'J' && ctrl[1] == 'C' && ctrl[2] == 'A' && ctrl[3] == 'O');
 
     std::string hello_model;
@@ -125,7 +125,7 @@ void TestJCastAoaCompanionWireParser() {
     std::vector<AndroidEncodedVideoPacket> vpkts;
     std::vector<AndroidPcmAudioPacket> apkts;
 
-    JCastAoaStreamParser aoa_parser(
+    TJCapAoaStreamParser aoa_parser(
         [&](const std::string& m, int sdk, uint32_t w, uint32_t h) {
             hello_model = m;
             hello_sdk = sdk;
@@ -145,25 +145,25 @@ void TestJCastAoaCompanionWireParser() {
     hello_body[71] = 2400 & 0xFF;
     hello_body[74] = (1080 >> 8) & 0xFF;
     hello_body[75] = 1080 & 0xFF;
-    auto p_hello = BuildJCastAoaStreamPacket(kAoaPktHelloDeviceMeta, 0, hello_body);
+    auto p_hello = BuildTJCapAoaStreamPacket(kAoaPktHelloDeviceMeta, 0, hello_body);
     bulk_stream.insert(bulk_stream.end(), p_hello.begin(), p_hello.end());
 
     // 2. Heartbeat packet
-    auto p_hb = BuildJCastAoaStreamPacket(kAoaPktHeartbeat, 0, {});
+    auto p_hb = BuildTJCapAoaStreamPacket(kAoaPktHeartbeat, 0, {});
     bulk_stream.insert(bulk_stream.end(), p_hb.begin(), p_hb.end());
 
     // 3. SPS/PPS Config + Keyframe + Audio PCM
     const std::vector<uint8_t> sps_pps = {0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x28};
     uint64_t wh_meta = (2400ULL << 32) | 1080ULL;
-    auto p_csd = BuildJCastAoaStreamPacket(kAoaPktVideoConfigSpsPps, wh_meta, sps_pps);
+    auto p_csd = BuildTJCapAoaStreamPacket(kAoaPktVideoConfigSpsPps, wh_meta, sps_pps);
     bulk_stream.insert(bulk_stream.end(), p_csd.begin(), p_csd.end());
 
     const std::vector<uint8_t> idr = {0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB};
-    auto p_idr = BuildJCastAoaStreamPacket(kAoaPktVideoH264Keyframe, 8333ULL, idr);
+    auto p_idr = BuildTJCapAoaStreamPacket(kAoaPktVideoH264Keyframe, 8333ULL, idr);
     bulk_stream.insert(bulk_stream.end(), p_idr.begin(), p_idr.end());
 
     const std::vector<uint8_t> pcm(1024 * 4, 0x11);
-    auto p_aud = BuildJCastAoaStreamPacket(kAoaPktAudioPcmS16LE, 10000ULL, pcm);
+    auto p_aud = BuildTJCapAoaStreamPacket(kAoaPktAudioPcmS16LE, 10000ULL, pcm);
     bulk_stream.insert(bulk_stream.end(), p_aud.begin(), p_aud.end());
 
     for (size_t i = 0; i < bulk_stream.size(); i += 7) {
@@ -210,7 +210,7 @@ void TestAdbDevicesParserAndUsbSpeedGating() {
 void TestSharedMemoryIpcAndImagePipeline() {
     std::cout << "[Test 5] Lock-free SharedCapture IPC (NV12 + 48kHz PCM + Preview BGRA32 + Health Telemetry)...\n";
 
-    const std::string test_shm = "JCastAndroidUnitTestShmV2";
+    const std::string test_shm = "TJCapAndroidUnitTestShmV2";
     SharedCaptureProducer prod;
     SharedCaptureConsumer cons;
     TEST_CHECK(prod.Open(test_shm));
@@ -273,22 +273,22 @@ void TestUpdaterAndDiagnosticsRedaction() {
 
     const char* sample_json = R"({
         "tag_name": "v1.1.0",
-        "name": "JCast for Android v1.1.0",
-        "html_url": "https://github.com/joey971018yt/android-usb-vcam/releases/tag/v1.1.0",
+        "name": "TJCap for Android v1.1.0",
+        "html_url": "https://github.com/joey971018yt/TJCap-for-Android/releases/tag/v1.1.0",
         "published_at": "2026-11-28T00:00:00Z",
         "draft": false,
         "prerelease": false,
         "body": "Bug fixes",
         "assets": [
             {
-                "name": "JCast-for-Android-Setup-v1.1.0.exe",
-                "browser_download_url": "https://github.com/joey971018yt/android-usb-vcam/releases/download/v1.1.0/JCast-for-Android-Setup-v1.1.0.exe",
+                "name": "TJCap-for-Android-Setup-v1.1.0.exe",
+                "browser_download_url": "https://github.com/joey971018yt/TJCap-for-Android/releases/download/v1.1.0/TJCap-for-Android-Setup-v1.1.0.exe",
                 "size": 12345678,
                 "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             },
             {
-                "name": "JCast-for-Android-Portable-v1.1.0.zip",
-                "browser_download_url": "https://github.com/joey971018yt/android-usb-vcam/releases/download/v1.1.0/JCast-for-Android-Portable-v1.1.0.zip",
+                "name": "TJCap-for-Android-Portable-v1.1.0.zip",
+                "browser_download_url": "https://github.com/joey971018yt/TJCap-for-Android/releases/download/v1.1.0/TJCap-for-Android-Portable-v1.1.0.zip",
                 "size": 9876543,
                 "digest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
             }
@@ -298,8 +298,8 @@ void TestUpdaterAndDiagnosticsRedaction() {
     GitHubReleaseInfo rel;
     std::string jerr;
     TEST_CHECK(ParseGitHubReleaseJson(sample_json, rel, &jerr));
-    TEST_CHECK(rel.setup_exe.name == "JCast-for-Android-Setup-v1.1.0.exe");
-    TEST_CHECK(rel.portable_zip.name == "JCast-for-Android-Portable-v1.1.0.zip");
+    TEST_CHECK(rel.setup_exe.name == "TJCap-for-Android-Setup-v1.1.0.exe");
+    TEST_CHECK(rel.portable_zip.name == "TJCap-for-Android-Portable-v1.1.0.zip");
     TEST_CHECK(rel.setup_exe.sha256_hex.size() == 64U);
 
     TEST_CHECK(ClassifyUsbOrTransportError("Android device is unauthorized") == DiagCode::E301_UsbDebugUnauthorized);
@@ -318,8 +318,8 @@ void TestUpdaterAndDiagnosticsRedaction() {
     TEST_CHECK(redacted.find("R5C****-REDACTED") != std::string::npos);
 
     std::string issue_url = BuildGitHubNewIssueUrl(
-        "joey971018yt", "android-usb-vcam", "1.0.0", DiagCode::E301_UsbDebugUnauthorized, sensitive);
-    TEST_CHECK(issue_url.find("https://github.com/joey971018yt/android-usb-vcam/issues/new?") == 0U);
+        "joey971018yt", "TJCap-for-Android", "1.0.0", DiagCode::E301_UsbDebugUnauthorized, sensitive);
+    TEST_CHECK(issue_url.find("https://github.com/joey971018yt/TJCap-for-Android/issues/new?") == 0U);
     TEST_CHECK(issue_url.find("JoeyLin") == std::string::npos);
 }
 
@@ -328,10 +328,10 @@ void TestUpdaterAndDiagnosticsRedaction() {
 int main() {
     TestScrcpyVideoStreamParserFragmented();
     TestScrcpyAudioStreamParser();
-    TestJCastAoaCompanionWireParser();
+    TestTJCapAoaCompanionWireParser();
     TestAdbDevicesParserAndUsbSpeedGating();
     TestSharedMemoryIpcAndImagePipeline();
     TestUpdaterAndDiagnosticsRedaction();
-    std::cout << "\nAll JCast for Android (ADB + Companion AOA) protocol, IPC, USB gating, updater & diagnostics unit tests PASSED!\n";
+    std::cout << "\nAll TJCap for Android (ADB + Companion AOA) protocol, IPC, USB gating, updater & diagnostics unit tests PASSED!\n";
     return 0;
 }

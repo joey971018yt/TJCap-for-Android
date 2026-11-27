@@ -1,6 +1,6 @@
 # 第三方開源元件授權聲明 (Third-Party Open Source Notices)
 
-**JCast for Android** 隨附使用以下獨立預編譯之第三方開源元件（皆透過獨立行程、動態連結程式庫或作業系統驅動層隔離呼叫，未與主程式靜態連結）：
+**TJCap for Android** 隨附使用以下獨立預編譯之第三方開源元件（皆透過獨立行程、動態連結程式庫或作業系統驅動層隔離呼叫，未與主程式靜態連結）：
 
 ---
 
@@ -11,7 +11,7 @@
 
 ---
 
-## 2. scrcpy-server (`runtime/jcast-server.jar`, upstream `scrcpy-server v5.0.1`)
+## 2. scrcpy-server (`runtime/tjcap-server.jar`, upstream `scrcpy-server v5.0.1`)
 - **官方網站 / 原始碼**：https://github.com/Genymobile/scrcpy
 - **版權聲明**：Copyright (C) 2018 Genymobile / Romain Vimont
 - **授權條款**：Apache License, Version 2.0 (`Apache-2.0`)

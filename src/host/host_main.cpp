@@ -66,7 +66,7 @@ enum class ResolutionMode {
 
 enum class ConnectionMode {
     AdbZeroApk,       // Default: USB Debugging (ADB + app_process, zero APK)
-    UsbAoaCompanion,  // Fallback: No USB Debugging (JCast Companion APK + MediaProjection + USB AOA)
+    UsbAoaCompanion,  // Fallback: No USB Debugging (TJCap Companion APK + MediaProjection + USB AOA)
     SmartAuto,        // Auto: Prefer ADB if USB Debugging active, else switch to USB AOA Companion
 };
 
@@ -88,12 +88,12 @@ struct HostOptions {
 
 void PrintUsage() {
     std::cout
-        << "JCast for Android — Core Capture Host (android_vcam_host.exe)\n"
+        << "TJCap for Android — Core Capture Host (android_vcam_host.exe)\n"
         << "Usage: android_vcam_host.exe [options]\n\n"
         << "Options:\n"
         << "  --conn <adb|aoa|auto>  Connection transport mode (default: adb):\n"
         << "                           adb  : Zero-APK USB Debugging direct mode\n"
-        << "                           aoa  : No-USB-Debugging JCast Companion APK + USB AOA mode\n"
+        << "                           aoa  : No-USB-Debugging TJCap Companion APK + USB AOA mode\n"
         << "                           auto : Prefer ADB, automatically fall back to USB AOA\n"
         << "  --res <mode>           Resolution & aspect mode (native / native1080 / 1440p / 1080p / 720p)\n"
         << "  --max-dim <px>         Lock max transmission long-edge (960 / 1280 / 1920 / 2560 / 3840)\n"
@@ -184,7 +184,7 @@ int RunMockPipeline(SharedCaptureProducer& producer, const HostOptions& opts) {
 
     std::cout << "[Host] Starting --mock self-test generator (" << mock_w << "x" << mock_h
               << "@60fps NV12 + 48kHz Stereo LPCM)...\n"
-              << "[Host] Open OBS / Discord / Zoom and select 'JCast for Android (Video)'!\n";
+              << "[Host] Open OBS / Discord / Zoom and select 'TJCap for Android (Video)'!\n";
 
     constexpr uint64_t kFrameIntervalNs = 16666667ULL;
     constexpr size_t kAudioFramesPerVideoFrame = 800;
@@ -343,7 +343,7 @@ int main(int argc, char** argv) {
         } else if (!opts.audio_out_match.empty()) {
             std::cerr << "[Audio] Warning: No playback endpoint matched \"" << opts.audio_out_match << "\".\n";
         } else {
-            std::cout << "[Audio] DirectShow 'JCast for Android (Audio)' active (48kHz LPCM).\n";
+            std::cout << "[Audio] DirectShow 'TJCap for Android (Audio)' active (48kHz LPCM).\n";
         }
     }
 
@@ -462,7 +462,7 @@ int main(int argc, char** argv) {
                   << " | Locked Max Edge: " << locked_max_dim << "px"
                   << " | Target: " << (target_bps / 1000000U) << " Mbps @ " << opts.max_fps << "fps\n";
         if (use_aoa_this_attempt) {
-            std::cout << "[AOA] 請在手機彈出的「JCast Companion」點擊『🚀 授權螢幕錄製並開始 USB-C 直播』！\n";
+            std::cout << "[AOA] 請在手機彈出的「TJCap Companion」點擊『🚀 授權螢幕錄製並開始 USB-C 直播』！\n";
         }
 
         MfH264Decoder decoder;
@@ -514,7 +514,7 @@ int main(int argc, char** argv) {
                                          DiagCode::E303_HandshakeNoFrames,
                                          DiagSeverity::Warning,
                                          use_aoa_this_attempt
-                                             ? "AOA 配件通道已連通但尚未收到畫面：請確認手機已安裝『JCast Companion APK』並點擊『開始螢幕錄製』。"
+                                             ? "AOA 配件通道已連通但尚未收到畫面：請確認手機已安裝『TJCap Companion APK』並點擊『開始螢幕錄製』。"
                                              : "USB-C 影音通道已建立但超過 8 秒未收到畫面封包：請確認手機螢幕已點亮解鎖並滑動一下畫面。")
                                   << "\n";
                     }

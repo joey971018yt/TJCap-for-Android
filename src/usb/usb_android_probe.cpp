@@ -455,9 +455,9 @@ std::filesystem::path ResolveBundledAdbPath(const std::filesystem::path& base_di
 
 std::filesystem::path ResolveBundledServerJarPath(const std::filesystem::path& base_dir) {
     std::error_code ec;
-    std::filesystem::path p1 = base_dir / L"runtime" / L"jcast-server.jar";
+    std::filesystem::path p1 = base_dir / L"runtime" / L"tjcap-server.jar";
     if (std::filesystem::exists(p1, ec)) return p1;
-    std::filesystem::path p2 = base_dir / L"jcast-server.jar";
+    std::filesystem::path p2 = base_dir / L"tjcap-server.jar";
     if (std::filesystem::exists(p2, ec)) return p2;
     return p1;
 }

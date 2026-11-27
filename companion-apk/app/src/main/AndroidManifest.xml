@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.jcast.android.companion"
+    package="com.tjcap.android.companion"
     android:versionCode="100"
     android:versionName="1.0.0">
 
@@ -20,7 +20,7 @@
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="JCast Companion"
+        android:label="TJCap Companion"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
@@ -42,7 +42,7 @@
         </activity>
 
         <service
-            android:name=".JCastCaptureService"
+            android:name=".TJCapCaptureService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />

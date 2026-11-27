@@ -13,7 +13,7 @@ namespace {
 const DiagCodeSpec kNoneSpec{
     DiagCode::None,
     DiagSeverity::Info,
-    "JCAST-OK",
+    "TJCAP-OK",
     "系統運作正常",
     "目前未偵測到任何硬體、ADB 通道、驅動或串流異常。",
     "無需額外操作。",
@@ -24,17 +24,17 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E101_MissingCoreFiles,
         DiagSeverity::Critical,
-        "JCAST-E101",
+        "TJCAP-E101",
         "缺少核心執行檔或內建 ADB／擷取元件",
-        "程式資料夾內遺失必要元件（如 android_vcam_host.exe、android_vcam_dshow.dll、runtime\\adb.exe 或 runtime\\jcast-server.jar），常見於未完整解壓縮 Portable.zip 或遭防毒軟體誤隔離。",
+        "程式資料夾內遺失必要元件（如 android_vcam_host.exe、android_vcam_dshow.dll、runtime\\adb.exe 或 runtime\\tjcap-server.jar），常見於未完整解壓縮 Portable.zip 或遭防毒軟體誤隔離。",
         "1. 請確認已將整個 ZIP 壓縮包「完整解壓縮」至同一資料夾（勿直接在壓縮檔內雙擊執行）。\n"
-        "2. 若防毒軟體攔截，請將 JCast for Android 資料夾加入信任排除清單，或改下載 Setup.exe 正式安裝版重新安裝。",
+        "2. 若防毒軟體攔截，請將 TJCap for Android 資料夾加入信任排除清單，或改下載 Setup.exe 正式安裝版重新安裝。",
         false,
     },
     {
         DiagCode::E102_AdbDaemonStartFailed,
         DiagSeverity::Error,
-        "JCAST-E102",
+        "TJCAP-E102",
         "內建 ADB 通訊服務啟動失敗或 5037 連接埠衝突",
         "無法啟動內建 runtime\\adb.exe 背景服務，常見於電腦背景同時開啟了第三方手機助手／模擬器內附的舊版 ADB 佔用 TCP 5037 連接埠。",
         "1. 請先關閉背景執行中的手機助手、Android 模擬器或其他有線投屏工具。\n"
@@ -44,7 +44,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E103_MissingMediaFoundation,
         DiagSeverity::Critical,
-        "JCAST-E103",
+        "TJCAP-E103",
         "系統缺少 Windows Media Foundation H.264 視訊解碼元件",
         "找不到 mfplat.dll 或 msmpeg2vdec.dll，常見於 Windows 10 / 11 N 或 KN 歐洲精簡版系統未安裝媒體功能套件。",
         "1. 開啟 Windows「設定 ➔ 系統 ➔ 選用功能 (Optional Features) ➔ 新增選用功能」。\n"
@@ -54,17 +54,17 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E104_DshowNotRegistered,
         DiagSeverity::Warning,
-        "JCAST-E104",
+        "TJCAP-E104",
         "DirectShow 虛擬擷取卡尚未註冊或路徑已變更",
         "尚未完成首次虛擬鏡頭註冊，或解壓縮資料夾在註冊後曾被搬移至其他路徑。",
         "1. 點擊主視窗或本診斷視窗中的「🔧 安裝／修復驅動」按鈕，自動以系統管理員權限重新註冊虛擬擷取卡。\n"
-        "2. 若 OBS Studio 已開啟，修復後重新啟動 OBS 即可選取 JCast for Android (Video) / (Audio)。",
+        "2. 若 OBS Studio 已開啟，修復後重新啟動 OBS 即可選取 TJCap for Android (Video) / (Audio)。",
         true,
     },
     {
         DiagCode::E201_AndroidUsbDriverIssue,
         DiagSeverity::Warning,
-        "JCAST-E201",
+        "TJCAP-E201",
         "已偵測到 Android USB 連線，但尚未開啟「USB 偵錯」或缺少 WinUSB 介面",
         "電腦已識別到 Android 手機 USB 連線，但手機尚未暴露 ADB 偵錯介面；最常見原因為手機尚未開啟「開發者選項 ➔ USB 偵錯」，或 USB 用途被設為純充電且停用了 ADB。",
         "1. 在 Android 手機開啟「設定 ➔ 關於手機 ➔ 連點 7 下『版本號碼』(小米為 OS 版本)」，退回「系統／更多設定 ➔ 開發者選項」開啟「USB 偵錯」。\n"
@@ -74,27 +74,27 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E202_AdbVersionConflict,
         DiagSeverity::Warning,
-        "JCAST-E202",
+        "TJCAP-E202",
         "偵測到系統內有其他舊版 ADB 伺服器版本衝突",
         "其他軟體啟動的舊版 adb.exe 與內建高速版 ADB 版本不一致 (adb server version doesn't match)，導致連線重設。",
         "1. 請關閉其他投屏軟體、Android Studio 或手機模擬器，避免背景重複搶奪 ADB 伺服器。\n"
-        "2. 重新點擊「🚀 智慧一鍵啟動」，JCast 將自動重啟乾淨的內建 ADB 通道。",
+        "2. 重新點擊「🚀 智慧一鍵啟動」，TJCap 將自動重啟乾淨的內建 ADB 通道。",
         false,
     },
     {
         DiagCode::E203_TunnelForwardFailed,
         DiagSeverity::Error,
-        "JCAST-E203",
+        "TJCAP-E203",
         "建立本機 USB-C 高速轉發通道 (adb forward) 失敗",
         "無法建立 127.0.0.1 本機 Loopback 轉發連接埠，可能因本機安全軟體攔截迴路連線，或手機在握手瞬間斷開。",
-        "1. 請確認防毒／防火牆未封鎖 JCast for Android 與 runtime\\adb.exe 的本機 127.0.0.1 連線。\n"
+        "1. 請確認防毒／防火牆未封鎖 TJCap for Android 與 runtime\\adb.exe 的本機 127.0.0.1 連線。\n"
         "2. 重新拔插 USB-C 傳輸線後再試一次。",
         false,
     },
     {
         DiagCode::E204_DeviceBusyOrOffline,
         DiagSeverity::Error,
-        "JCAST-E204",
+        "TJCAP-E204",
         "Android 裝置處於離線 (offline) 或忙碌狀態",
         "ADB 偵測到裝置狀態為 offline，通常因 USB-C 線材接觸不良、USB 集線器供電不穩，或手機剛切換 USB 模式尚未就緒。",
         "1. 請拔下手機端 USB-C 傳輸線，等待 2 秒後重新插回電腦主機板原生 USB 接口。\n"
@@ -104,7 +104,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E301_UsbDebugUnauthorized,
         DiagSeverity::Warning,
-        "JCAST-E301",
+        "TJCAP-E301",
         "手機尚未點擊「允許 USB 偵錯」授權視窗 (unauthorized)",
         "電腦已連通手機 ADB 介面，但手機螢幕正在等待您點擊 RSA 金鑰信任授權。",
         "1. 請解鎖手機螢幕，在彈出的「允許 USB 偵錯嗎？」視窗勾選「一律允許透過這台電腦進行偵錯」，並點擊「允許／確定」。\n"
@@ -114,9 +114,9 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E302_AgentStartFailed,
         DiagSeverity::Error,
-        "JCAST-E302",
+        "TJCAP-E302",
         "啟動手機端免安裝硬體編碼微服務 (app_process) 失敗",
-        "無法推送 jcast-server.jar 至 /data/local/tmp 或執行 app_process 被品牌系統攔截（如 OPPO / Realme / 小米未開啟對應偵錯子選項）。",
+        "無法推送 tjcap-server.jar 至 /data/local/tmp 或執行 app_process 被品牌系統攔截（如 OPPO / Realme / 小米未開啟對應偵錯子選項）。",
         "1. OPPO / OnePlus / Realme 用戶：請在開發者選項額外關閉「權限監控 (Disable permission monitoring)」。\n"
         "2. 確認手機內部儲存空間未完全滿載，並重新插拔 USB-C 線再試。",
         false,
@@ -124,7 +124,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E303_HandshakeNoFrames,
         DiagSeverity::Warning,
-        "JCAST-E303",
+        "TJCAP-E303",
         "USB-C 影音通道已建立但逾時未收到畫面封包",
         "已連通手機端編碼器但超過 8 秒未收到 H.264 影格；通常因手機處於休眠黑屏（SurfaceFlinger 暫停出幀）或當前 App 啟用 FLAG_SECURE 防錄影保護。",
         "1. 請按電源鍵點亮並解鎖 Android 手機螢幕，隨意滑動一下桌面即可立即觸發硬體編碼出幀。\n"
@@ -134,7 +134,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E304_UsbTransferIoDrop,
         DiagSeverity::Error,
-        "JCAST-E304",
+        "TJCAP-E304",
         "USB-C 傳輸途中發生連線中斷或線材瞬斷",
         "串流期間視訊 Socket 意外中斷；除正常拔線外，常見於 USB-C 接頭鬆動、機殼前置 USB 孔壓降過大，或僅充電劣質線材干擾。",
         "1. 檢查手機與電腦兩端 USB-C 接頭是否緊密，優先改插「電腦主機板後方原生 USB 3.0 / Type-C 接口」。\n"
@@ -144,7 +144,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E401_DecoderInitFailed,
         DiagSeverity::Critical,
-        "JCAST-E401",
+        "TJCAP-E401",
         "H.264 視訊解碼器初始化失敗",
         "顯示卡 D3D11VA 硬體解碼與系統軟體解碼器皆無法建立，可能因顯示卡驅動異常或缺少系統解碼器。",
         "1. 請嘗試取消勾選主視窗的「啟用 GPU 硬體超低延遲解碼 (D3D11VA)」改用 CPU 軟解測試。\n"
@@ -154,7 +154,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E402_GpuFallbackToSoftware,
         DiagSeverity::Warning,
-        "JCAST-E402",
+        "TJCAP-E402",
         "GPU 硬體解碼異常，已自動無縫降級為 CPU 軟體解碼",
         "顯示卡 D3D11VA 發生驅動重置 (TDR) 或不支援目前畫面組態；系統已自動切換至 CPU 軟體解碼以確保直播不中斷。",
         "1. 目前串流已自動恢復運作，您可繼續安心直播。\n"
@@ -164,7 +164,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E403_HighDecodeLatency,
         DiagSeverity::Warning,
-        "JCAST-E403",
+        "TJCAP-E403",
         "解碼管線延遲偏高（超過 60fps 16.7ms 預算）",
         "單張影格解碼與縮放耗時過長，可能導致高幀率直播掉幀；常見於未開啟 D3D11VA 硬體解碼卻執行 2K+ 超高解析度。",
         "1. 請確認已勾選「啟用 GPU 硬體超低延遲解碼 (D3D11VA)」。\n"
@@ -174,9 +174,9 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E501_AudioEndpointLost,
         DiagSeverity::Warning,
-        "JCAST-E501",
+        "TJCAP-E501",
         "電腦端音訊監聽裝置已斷開或失效",
-        "直播途中拔除了耳機／USB 音效卡或藍牙音訊中斷 (AUDCLNT_E_DEVICE_INVALIDATED)。註：OBS 內的「JCast for Android (Audio)」不受影響仍正常收音！",
+        "直播途中拔除了耳機／USB 音效卡或藍牙音訊中斷 (AUDCLNT_E_DEVICE_INVALIDATED)。註：OBS 內的「TJCap for Android (Audio)」不受影響仍正常收音！",
         "1. 若僅需 OBS 直播收音，可忽略此提示，OBS 音軌完全正常。\n"
         "2. 若需恢復電腦耳機同步監聽，請重新接上耳機後停止並重新啟動一次投影。",
         false,
@@ -184,17 +184,17 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E502_SharedMemInitFailed,
         DiagSeverity::Critical,
-        "JCAST-E502",
+        "TJCAP-E502",
         "無法建立跨行程高畫質共享記憶體 (AndroidUsbVcamSharedMemV2)",
         "系統可用虛擬記憶體（分頁檔 Commit Charge）不足，或遭舊版高權限行程鎖定同名區段。",
         "1. 關閉佔用大量記憶體的閒置程式，確認 Windows 虛擬記憶體（分頁檔）未被手動停用。\n"
-        "2. 重新啟動 JCast for Android 與 OBS Studio。",
+        "2. 重新啟動 TJCap for Android 與 OBS Studio。",
         false,
     },
     {
         DiagCode::E503_HostUnexpectedExit,
         DiagSeverity::Critical,
-        "JCAST-E503",
+        "TJCAP-E503",
         "背景擷取核心程序 (android_vcam_host.exe) 異常終止",
         "擷取引擎在非使用者手動停止的情況下提前結束並回傳非零錯誤碼。",
         "1. 請檢視下方「程序結束代碼說明」與近期錯誤紀錄。\n"
@@ -204,7 +204,7 @@ const DiagCodeSpec kSpecs[] = {
     {
         DiagCode::E504_DeviceAudioUnsupported,
         DiagSeverity::Warning,
-        "JCAST-E504",
+        "TJCAP-E504",
         "此手機系統版本不支援免 Root 內錄音訊，已自動維持純畫面鏡像",
         "Android 原生免 Root 系統內錄音訊需要 Android 11 (API 30) 以上版本；目前裝置已自動停用音訊軌並保持低延遲畫面傳輸。",
         "1. 畫面擷取完全正常，您可繼續使用視訊直播。\n"
@@ -271,7 +271,7 @@ const DiagCodeSpec& LookupDiagSpec(DiagCode code) {
 }
 
 DiagCode ParseDiagCodeToken(std::string_view token) {
-    if (token.rfind("JCAST-", 0) == 0) {
+    if (token.rfind("TJCAP-", 0) == 0) {
         token.remove_prefix(6);
     }
     if (token.size() >= 4 && (token[0] == 'E' || token[0] == 'e')) {
@@ -287,7 +287,7 @@ DiagCode ParseDiagCodeToken(std::string_view token) {
 
 DiagCode ClassifyUsbOrTransportError(std::string_view raw_err) {
     std::string low = ToLowerCopy(raw_err);
-    if ((low.find("adb.exe") != std::string::npos || low.find("jcast-server.jar") != std::string::npos) &&
+    if ((low.find("adb.exe") != std::string::npos || low.find("tjcap-server.jar") != std::string::npos) &&
         (low.find("missing") != std::string::npos || low.find("not found") != std::string::npos)) {
         return DiagCode::E101_MissingCoreFiles;
     }
@@ -326,10 +326,10 @@ DiagCode ClassifyUsbOrTransportError(std::string_view raw_err) {
 std::string FormatHostDiagLine(DiagCode code, DiagSeverity sev, std::string_view detail_utf8) {
     const auto& spec = LookupDiagSpec(code);
     const char* short_code = spec.code_str;
-    if (std::strncmp(short_code, "JCAST-", 6) == 0) {
+    if (std::strncmp(short_code, "TJCAP-", 6) == 0) {
         short_code += 6;
     }
-    std::string out = "[JCAST-DIAG|";
+    std::string out = "[TJCAP-DIAG|";
     out += short_code;
     out += "|";
     out += SeverityTag(sev);
@@ -339,7 +339,7 @@ std::string FormatHostDiagLine(DiagCode code, DiagSeverity sev, std::string_view
 }
 
 bool ParseHostDiagLine(std::string_view line_utf8, ParsedDiagEvent& out_event) {
-    constexpr std::string_view kPrefix = "[JCAST-DIAG|";
+    constexpr std::string_view kPrefix = "[TJCAP-DIAG|";
     if (line_utf8.rfind(kPrefix, 0) != 0) {
         return false;
     }
@@ -380,7 +380,7 @@ std::string DescribeProcessExitCode(uint32_t exit_code) {
         case 0U:
             return s + " — 正常結束";
         case 1U:
-            return s + " — 初始化錯誤（請查看上方對應 JCAST-E 錯誤碼，如缺少檔案、ADB 通道或共享記憶體失敗）";
+            return s + " — 初始化錯誤（請查看上方對應 TJCAP-E 錯誤碼，如缺少檔案、ADB 通道或共享記憶體失敗）";
         case 0xC0000135U:
             return s + " — STATUS_DLL_NOT_FOUND（系統缺少必要系統 DLL 或未完整解壓縮程式資料夾）";
         case 0xC000007BU:
@@ -483,7 +483,7 @@ std::string BuildGitHubNewIssueUrl(
     DiagCode primary_code,
     std::string_view short_summary_utf8) {
     const auto& spec = LookupDiagSpec(primary_code);
-    std::string title = "[診斷回報] JCast for Android v" + std::string(app_version);
+    std::string title = "[診斷回報] TJCap for Android v" + std::string(app_version);
     if (primary_code != DiagCode::None) {
         title += " — ";
         title += spec.code_str;

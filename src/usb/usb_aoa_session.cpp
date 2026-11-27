@@ -417,8 +417,8 @@ bool UsbAoaSession::OpenAndNegotiateAoa(
         return false;
     }
 
-    // Send 24-byte JCAO START_STREAM configuration frame to JCast Companion APK
-    auto start_frame = BuildJCastAoaControlFrame(
+    // Send 24-byte JCAO START_STREAM configuration frame to TJCap Companion APK
+    auto start_frame = BuildTJCapAoaControlFrame(
         kAoaCmdStartStream,
         static_cast<uint16_t>(cfg.max_fps),
         cfg.max_size,
@@ -457,10 +457,10 @@ bool UsbAoaSession::RunBulkStreamLoop(
         return false;
     }
 
-    JCastAoaStreamParser parser(
+    TJCapAoaStreamParser parser(
         [&](const std::string& model, int sdk_int, uint32_t w, uint32_t h) {
             std::printf(
-                "[AOA] JCast Companion APK connected: %s (Android API %d, %ux%u)\n",
+                "[AOA] TJCap Companion APK connected: %s (Android API %d, %ux%u)\n",
                 model.c_str(),
                 sdk_int,
                 w,
@@ -526,7 +526,7 @@ bool UsbAoaSession::RunBulkStreamLoop(
 void UsbAoaSession::StopAndClose() {
 #ifdef _WIN32
     if (impl_->handle) {
-        auto stop_frame = BuildJCastAoaControlFrame(kAoaCmdStopStream, 60, 1920, 16000000, false, true);
+        auto stop_frame = BuildTJCapAoaControlFrame(kAoaCmdStopStream, 60, 1920, 16000000, false, true);
         int transferred = 0;
         {
             std::lock_guard<std::mutex> lk(write_mu_);

@@ -239,7 +239,7 @@ public:
 
     STDMETHODIMP QueryVendorInfo(LPWSTR* pVendorInfo) override {
         if (!pVendorInfo) return E_POINTER;
-        const wchar_t* v = L"JCast for Android (Audio)";
+        const wchar_t* v = L"TJCap for Android (Audio)";
         size_t bytes = (wcslen(v) + 1) * sizeof(wchar_t);
         *pVendorInfo = static_cast<LPWSTR>(CoTaskMemAlloc(bytes));
         if (!*pVendorInfo) return E_OUTOFMEMORY;

@@ -216,7 +216,7 @@ bool AdbStreamSession::ConnectAndStart(
         return false;
     }
     if (!std::filesystem::exists(cfg.server_jar_path, ec)) {
-        if (out_error) *out_error = "Missing bundled runtime/jcast-server.jar.";
+        if (out_error) *out_error = "Missing bundled runtime/tjcap-server.jar.";
         return false;
     }
     impl_->adb_exe = cfg.adb_exe_path;
@@ -325,14 +325,14 @@ bool AdbStreamSession::ConnectAndStart(
             : (model_str.empty() ? std::string("Android Device") : model_str);
     out_device_info.usb_speed = ProbeConnectedAndroidLinkSpeed();
 
-    // 3. Push bundled jcast-server.jar to /data/local/tmp/jcast-server.jar
+    // 3. Push bundled tjcap-server.jar to /data/local/tmp/tjcap-server.jar
     std::string push_out;
     DWORD push_ec = 0;
     std::wstring push_args =
-        L"-s \"" + wserial + L"\" push \"" + cfg.server_jar_path.wstring() + L"\" /data/local/tmp/jcast-server.jar";
+        L"-s \"" + wserial + L"\" push \"" + cfg.server_jar_path.wstring() + L"\" /data/local/tmp/tjcap-server.jar";
     if (!RunAdbSyncCommand(cfg.adb_exe_path, push_args, 8000U, push_out, &push_ec) || push_ec != 0) {
         if (out_error) {
-            *out_error = "adb push jcast-server.jar failed: " + TrimStr(push_out);
+            *out_error = "adb push tjcap-server.jar failed: " + TrimStr(push_out);
         }
         return false;
     }
@@ -369,7 +369,7 @@ bool AdbStreamSession::ConnectAndStart(
     const bool request_audio = cfg.enable_audio;
     std::wstring shell_args =
         L"-s \"" + wserial +
-        L"\" shell CLASSPATH=/data/local/tmp/jcast-server.jar app_process / com.genymobile.scrcpy.Server " +
+        L"\" shell CLASSPATH=/data/local/tmp/tjcap-server.jar app_process / com.genymobile.scrcpy.Server " +
         Utf8ToWideLocal(kBundledScrcpyServerVersion) +
         L" scid=" + Utf8ToWideLocal(scid_hex) +
         L" log_level=info tunnel_forward=true video=true audio=" + (request_audio ? L"true" : L"false") +

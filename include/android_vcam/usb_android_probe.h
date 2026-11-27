@@ -99,7 +99,7 @@ struct AdbDeviceEntry {
 // Pure C++20 parser for `adb devices -l` output (unit-tested on Linux & Windows)
 std::vector<AdbDeviceEntry> ParseAdbDevicesOutput(std::string_view raw_output);
 
-// Resolves bundled runtime/adb.exe and runtime/jcast-server.jar relative to base_dir
+// Resolves bundled runtime/adb.exe and runtime/tjcap-server.jar relative to base_dir
 std::filesystem::path ResolveBundledAdbPath(const std::filesystem::path& base_dir);
 std::filesystem::path ResolveBundledServerJarPath(const std::filesystem::path& base_dir);
 

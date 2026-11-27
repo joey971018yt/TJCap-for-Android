@@ -1,4 +1,4 @@
-name: Windows x64 MSVC App, Companion APK & Installer Build (JCast for Android)
+name: Windows x64 MSVC App, Companion APK & Installer Build (TJCap for Android)
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "release-msvc-win64\companion" | Out-Null
 
           Copy-Item "build-msvc\Release\android_vcam_gui.exe" "release-msvc-win64\"
-          Copy-Item "build-msvc\Release\android_vcam_gui.exe" "release-msvc-win64\JCast for Android.exe"
+          Copy-Item "build-msvc\Release\android_vcam_gui.exe" "release-msvc-win64\TJCap for Android.exe"
           Copy-Item "build-msvc\Release\android_vcam_dshow.dll" "release-msvc-win64\"
           Copy-Item "build-msvc\Release\android_vcam_host.exe" "release-msvc-win64\"
           Copy-Item "build-msvc\Release\android_vcam_driver_setup.exe" "release-msvc-win64\"
@@ -54,22 +54,22 @@ jobs:
             Copy-Item "companion\*" "release-msvc-win64\companion\"
           }
 
-          # Create clean Portable App ZIP (JCast-for-Android-Portable-v1.0.0.zip)
-          New-Item -ItemType Directory -Force -Path "build-installer\JCast-for-Android" | Out-Null
-          Copy-Item "release-msvc-win64\JCast for Android.exe" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\android_vcam_gui.exe" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\android_vcam_host.exe" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\android_vcam_driver_setup.exe" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\android_vcam_dshow.dll" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\install_all_admin.ps1" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\uninstall_all_admin.ps1" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\README.md" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\CHANGELOG.md" "build-installer\JCast-for-Android\"
-          Copy-Item "release-msvc-win64\THIRD_PARTY_NOTICES.md" "build-installer\JCast-for-Android\"
-          Copy-Item -Recurse "release-msvc-win64\runtime" "build-installer\JCast-for-Android\runtime"
-          Copy-Item -Recurse "release-msvc-win64\drivers" "build-installer\JCast-for-Android\drivers"
-          Copy-Item -Recurse "release-msvc-win64\companion" "build-installer\JCast-for-Android\companion"
-          Compress-Archive -Path "build-installer\JCast-for-Android" -DestinationPath "build-installer\JCast-for-Android-Portable-v1.0.0.zip" -Force
+          # Create clean Portable App ZIP (TJCap-for-Android-Portable-v1.0.0.zip)
+          New-Item -ItemType Directory -Force -Path "build-installer\TJCap-for-Android" | Out-Null
+          Copy-Item "release-msvc-win64\TJCap for Android.exe" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\android_vcam_gui.exe" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\android_vcam_host.exe" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\android_vcam_driver_setup.exe" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\android_vcam_dshow.dll" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\install_all_admin.ps1" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\uninstall_all_admin.ps1" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\README.md" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\CHANGELOG.md" "build-installer\TJCap-for-Android\"
+          Copy-Item "release-msvc-win64\THIRD_PARTY_NOTICES.md" "build-installer\TJCap-for-Android\"
+          Copy-Item -Recurse "release-msvc-win64\runtime" "build-installer\TJCap-for-Android\runtime"
+          Copy-Item -Recurse "release-msvc-win64\drivers" "build-installer\TJCap-for-Android\drivers"
+          Copy-Item -Recurse "release-msvc-win64\companion" "build-installer\TJCap-for-Android\companion"
+          Compress-Archive -Path "build-installer\TJCap-for-Android" -DestinationPath "build-installer\TJCap-for-Android-Portable-v1.0.0.zip" -Force
 
       - name: Build Windows App Setup.exe via Inno Setup 6
         shell: pwsh
@@ -84,55 +84,55 @@ jobs:
           }
           & $iscc "installer\android_usb_capture.iss"
 
-      - name: Upload native MSVC binaries & JCast for Android App packages
+      - name: Upload native MSVC binaries & TJCap for Android App packages
         uses: actions/upload-artifact@v4
         with:
-          name: jcast-for-android-app-packages
+          name: tjcap-for-android-app-packages
           path: |
             release-msvc-win64/
-            build-installer/JCast-for-Android-Setup-v1.0.0.exe
-            build-installer/JCast-for-Android-Portable-v1.0.0.zip
-            companion/JCast-Companion-v1.0.0.apk
+            build-installer/TJCap-for-Android-Setup-v1.0.0.exe
+            build-installer/TJCap-for-Android-Portable-v1.0.0.zip
+            companion/TJCap-Companion-v1.0.0.apk
 
-      - name: Publish JCast for Android Setup.exe, Portable.zip & Companion.apk to GitHub Release v1.0.0
+      - name: Publish TJCap for Android Setup.exe, Portable.zip & Companion.apk to GitHub Release v1.0.0
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $notes = @"
-          ## 🟢 JCast for Android v1.0.0 — 免實體擷取卡 × 免 Root 雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 App
+          ## 🟢 TJCap for Android v1.0.0 — 免實體擷取卡 × 免 Root 雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 App
 
           ### ✨ 核心亮點
           - **⚡ 雙模免 Root USB-C 有線擷取架構**：
             1. **預設推薦 — 免裝手機 App 直連（USB 偵錯 / ADB 硬體編碼）**：免在手機手動安裝任何 APK，支援 `60 / 120 FPS` 硬體 H.264 編碼與 Android 11+ 全系統原生內錄立體聲（`48kHz PCM`），小米/Redmi 免開安全設定即可直連！
-            2. **備援方案 — 免開 USB 偵錯模式（JCast Companion APK + USB AOA 配件直連）**：專為禁止開啟「開發者選項／USB 偵錯」的手遊或受管設備設計，透過 `MediaProjection` + `USB Open Accessory (AOA)` 純配件通道高速傳輸！
-          - **🎥 原生 Windows DirectShow 雙路虛擬擷取卡**：自動註冊 **`JCast for Android (Video)`** 與 **`JCast for Android (Audio)`**（獨立 CLSID，可與 `JCast for iOS` 並存同時執行！），支援 OBS Studio、Discord、Zoom、Teams 滿版零黑邊擷取。
+            2. **備援方案 — 免開 USB 偵錯模式（TJCap Companion APK + USB AOA 配件直連）**：專為禁止開啟「開發者選項／USB 偵錯」的手遊或受管設備設計，透過 `MediaProjection` + `USB Open Accessory (AOA)` 純配件通道高速傳輸！
+          - **🎥 原生 Windows DirectShow 雙路虛擬擷取卡**：自動註冊 **`TJCap for Android (Video)`** 與 **`TJCap for Android (Audio)`**（獨立 CLSID，可與 `JCast for iOS` 並存同時執行！），支援 OBS Studio、Discord、Zoom、Teams 滿版零黑邊擷取。
           - **⚡ USB 接口速率智慧辨識**：自動偵測 `USB 3.x (5/10/20 Gbps)` 與 `USB 2.0 (480 Mbps)` 開放對應最高 `3840p` / `2560p` 上限，開始傳輸後全程鎖定畫布不閃爍。
-          - **📊 翠綠主題控制台 × 四欄式健康度儀表板 × 獨立全螢幕預覽 (`F11`) × 原畫質無損截圖 (`F12`) × 智慧故障診斷報錯中心 (`JCAST-E101`～`E504`)**。
+          - **📊 翠綠主題控制台 × 四欄式健康度儀表板 × 獨立全螢幕預覽 (`F11`) × 原畫質無損截圖 (`F12`) × 智慧故障診斷報錯中心 (`TJCAP-E101`～`E504`)**。
 
           ---
 
           ### 📦 下載檔案說明
-          1. **推薦下載：`JCast-for-Android-Setup-v1.0.0.exe`（Windows 正式安裝版 App，已內含 Companion APK）**
-          2. **免安裝選擇：`JCast-for-Android-Portable-v1.0.0.zip`（Windows 綠色便攜版 App，已內含 Companion APK）**
-          3. **手機端選用備援包：`JCast-Companion-v1.0.0.apk`（僅在選擇「免開 USB 偵錯 AOA 備援模式」時需安裝於手機）**
+          1. **推薦下載：`TJCap-for-Android-Setup-v1.0.0.exe`（Windows 正式安裝版 App，已內含 Companion APK）**
+          2. **免安裝選擇：`TJCap-for-Android-Portable-v1.0.0.zip`（Windows 綠色便攜版 App，已內含 Companion APK）**
+          3. **手機端選用備援包：`TJCap-Companion-v1.0.0.apk`（僅在選擇「免開 USB 偵錯 AOA 備援模式」時需安裝於手機）**
           "@
           gh release view v1.0.0 >$null 2>&1
           if ($LASTEXITCODE -eq 0) {
             gh release edit v1.0.0 `
-              --title "JCast for Android v1.0.0 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
+              --title "TJCap for Android v1.0.0 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
               --notes $notes
             gh release upload v1.0.0 `
-              "build-installer\JCast-for-Android-Setup-v1.0.0.exe" `
-              "build-installer\JCast-for-Android-Portable-v1.0.0.zip" `
-              "companion\JCast-Companion-v1.0.0.apk" `
+              "build-installer\TJCap-for-Android-Setup-v1.0.0.exe" `
+              "build-installer\TJCap-for-Android-Portable-v1.0.0.zip" `
+              "companion\TJCap-Companion-v1.0.0.apk" `
               --clobber
           } else {
             gh release create v1.0.0 `
-              "build-installer\JCast-for-Android-Setup-v1.0.0.exe" `
-              "build-installer\JCast-for-Android-Portable-v1.0.0.zip" `
-              "companion\JCast-Companion-v1.0.0.apk" `
-              --title "JCast for Android v1.0.0 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
+              "build-installer\TJCap-for-Android-Setup-v1.0.0.exe" `
+              "build-installer\TJCap-for-Android-Portable-v1.0.0.zip" `
+              "companion\TJCap-Companion-v1.0.0.apk" `
+              --title "TJCap for Android v1.0.0 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
               --notes $notes
           }

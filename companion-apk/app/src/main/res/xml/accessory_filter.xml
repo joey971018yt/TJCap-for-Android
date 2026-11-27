@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <usb-accessory
-        manufacturer="JCast Project"
-        model="JCast for Android"
+        manufacturer="TJCap Project"
+        model="TJCap for Android"
         version="1.0" />
 </resources>

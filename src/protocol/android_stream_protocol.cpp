@@ -350,7 +350,7 @@ bool ScrcpyAudioStreamParser::FeedBytes(std::span<const uint8_t> chunk, std::str
     return true;
 }
 
-JCastAoaStreamParser::JCastAoaStreamParser(
+TJCapAoaStreamParser::TJCapAoaStreamParser(
     OnDeviceHelloFn on_hello,
     OnVideoPacketFn on_video,
     OnAudioPacketFn on_audio,
@@ -362,7 +362,7 @@ JCastAoaStreamParser::JCastAoaStreamParser(
     Reset();
 }
 
-void JCastAoaStreamParser::Reset() {
+void TJCapAoaStreamParser::Reset() {
     state_ = State::WaitHeader;
     buf_.clear();
     read_pos_ = 0;
@@ -379,7 +379,7 @@ void JCastAoaStreamParser::Reset() {
     audio_packets_ = 0;
 }
 
-bool JCastAoaStreamParser::FeedUsbBulkBytes(std::span<const uint8_t> chunk, std::string* out_error) {
+bool TJCapAoaStreamParser::FeedUsbBulkBytes(std::span<const uint8_t> chunk, std::string* out_error) {
     if (state_ == State::Failed) {
         if (out_error) *out_error = "AOA stream parser is in failed state.";
         return false;
@@ -395,15 +395,15 @@ bool JCastAoaStreamParser::FeedUsbBulkBytes(std::span<const uint8_t> chunk, std:
         const uint8_t* ptr = buf_.data() + read_pos_;
 
         if (state_ == State::WaitHeader) {
-            if (avail < kJCastAoaStreamHeaderBytes) break;
+            if (avail < kTJCapAoaStreamHeaderBytes) break;
 
             uint32_t magic = ReadBe32(ptr);
-            if (magic != kJCastAoaMagic) {
+            if (magic != kTJCapAoaMagic) {
                 // Resynchronize scan up to 4KB in case of leftover stale USB FIFO byte
                 size_t sync_offset = 1U;
                 bool resynced = false;
                 while (sync_offset + 4U <= avail && sync_offset < 4096U) {
-                    if (ReadBe32(ptr + sync_offset) == kJCastAoaMagic) {
+                    if (ReadBe32(ptr + sync_offset) == kTJCapAoaMagic) {
                         read_pos_ += sync_offset;
                         resynced = true;
                         break;
@@ -415,7 +415,7 @@ bool JCastAoaStreamParser::FeedUsbBulkBytes(std::span<const uint8_t> chunk, std:
                 }
                 state_ = State::Failed;
                 if (out_error) {
-                    *out_error = "Invalid JCast AOA packet magic (expected 'JCAO').";
+                    *out_error = "Invalid TJCap AOA packet magic (expected 'JCAO').";
                 }
                 return false;
             }
@@ -423,7 +423,7 @@ bool JCastAoaStreamParser::FeedUsbBulkBytes(std::span<const uint8_t> chunk, std:
             pending_type_ = ptr[4];
             pending_meta_ = ReadBe64(ptr + 8);
             pending_len_ = ReadBe32(ptr + 16);
-            read_pos_ += kJCastAoaStreamHeaderBytes;
+            read_pos_ += kTJCapAoaStreamHeaderBytes;
 
             if (pending_len_ > kScrcpyMaxPacketBytes) {
                 state_ = State::Failed;
@@ -606,7 +606,7 @@ std::vector<uint8_t> BuildScrcpyFramePacket(
     return out;
 }
 
-std::vector<uint8_t> BuildJCastAoaControlFrame(
+std::vector<uint8_t> BuildTJCapAoaControlFrame(
     uint8_t cmd,
     uint16_t max_fps,
     uint32_t max_dim,
@@ -614,9 +614,9 @@ std::vector<uint8_t> BuildJCastAoaControlFrame(
     bool enable_audio,
     bool lock_orientation) {
     std::vector<uint8_t> out;
-    out.reserve(kJCastAoaCtrlFrameBytes);
-    WriteBe32(out, kJCastAoaMagic);
-    out.push_back(kJCastAoaVersion);
+    out.reserve(kTJCapAoaCtrlFrameBytes);
+    WriteBe32(out, kTJCapAoaMagic);
+    out.push_back(kTJCapAoaVersion);
     out.push_back(cmd);
     WriteBe16(out, max_fps);
     WriteBe32(out, max_dim);
@@ -625,19 +625,19 @@ std::vector<uint8_t> BuildJCastAoaControlFrame(
     if (enable_audio) flags |= kAoaCtrlFlagEnableAudio;
     if (lock_orientation) flags |= kAoaCtrlFlagLockOrientation;
     out.push_back(flags);
-    while (out.size() < kJCastAoaCtrlFrameBytes) {
+    while (out.size() < kTJCapAoaCtrlFrameBytes) {
         out.push_back(0);
     }
     return out;
 }
 
-std::vector<uint8_t> BuildJCastAoaStreamPacket(
+std::vector<uint8_t> BuildTJCapAoaStreamPacket(
     uint8_t pkt_type,
     uint64_t pts_us_or_meta,
     std::span<const uint8_t> payload) {
     std::vector<uint8_t> out;
-    out.reserve(kJCastAoaStreamHeaderBytes + payload.size());
-    WriteBe32(out, kJCastAoaMagic);
+    out.reserve(kTJCapAoaStreamHeaderBytes + payload.size());
+    WriteBe32(out, kTJCapAoaMagic);
     out.push_back(pkt_type);
     out.push_back(0);
     WriteBe16(out, 0);

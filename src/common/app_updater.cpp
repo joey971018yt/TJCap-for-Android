@@ -548,7 +548,7 @@ UpdateCheckResult CheckGitHubLatestRelease(
     res.current_version = std::string(current_version);
 
 #ifdef _WIN32
-    std::wstring ua = L"JCast-for-Android/" + Utf8ToWideLocal(current_version) + L" (Windows NT; Win64; x64)";
+    std::wstring ua = L"TJCap-for-Android/" + Utf8ToWideLocal(current_version) + L" (Windows NT; Win64; x64)";
     WinHttpHandleGuard session(OpenConfiguredWinHttpSession(ua));
     if (!session) {
         res.error_message = "無法初始化 Windows WinHTTP 網路服務。";
@@ -696,7 +696,7 @@ bool DownloadReleaseAssetHttps(
         path_query.append(uc.lpszExtraInfo, uc.dwExtraInfoLength);
     }
 
-    WinHttpHandleGuard session(OpenConfiguredWinHttpSession(L"JCast-for-Android-Updater/1.5.1"));
+    WinHttpHandleGuard session(OpenConfiguredWinHttpSession(L"TJCap-for-Android-Updater/1.5.1"));
     if (!session) {
         if (out_error) *out_error = "無法初始化 WinHTTP 下載工作階段。";
         return false;
@@ -964,7 +964,7 @@ bool LaunchPortableZipSelfUpdate(
     }
 
     std::filesystem::path work_dir = zip_path.parent_path();
-    std::filesystem::path ps1_path = work_dir / L"jcast_apply_portable_update.ps1";
+    std::filesystem::path ps1_path = work_dir / L"tjcap_apply_portable_update.ps1";
 
     auto escape_ps_single = [](const std::wstring& s) {
         std::wstring out;
@@ -1001,8 +1001,8 @@ bool LaunchPortableZipSelfUpdate(
         "if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }\r\n"
         "Expand-Archive -LiteralPath $zipPath -DestinationPath $stage -Force\r\n"
         "$srcRoot = $stage\r\n"
-        "if (Test-Path -LiteralPath (Join-Path $stage 'JCast-for-Android')) {\r\n"
-        "    $srcRoot = Join-Path $stage 'JCast-for-Android'\r\n"
+        "if (Test-Path -LiteralPath (Join-Path $stage 'TJCap-for-Android')) {\r\n"
+        "    $srcRoot = Join-Path $stage 'TJCap-for-Android'\r\n"
         "}\r\n"
         "Get-ChildItem -LiteralPath $srcRoot -Recurse -File | ForEach-Object {\r\n"
         "    $rel = $_.FullName.Substring($srcRoot.Length).TrimStart('\\','/')\r\n"
@@ -1022,7 +1022,7 @@ bool LaunchPortableZipSelfUpdate(
         "}\r\n"
         "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\r\n"
         "Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue\r\n"
-        "$exeToLaunch = Join-Path $appDir 'JCast for Android.exe'\r\n"
+        "$exeToLaunch = Join-Path $appDir 'TJCap for Android.exe'\r\n"
         "if (-not (Test-Path -LiteralPath $exeToLaunch)) {\r\n"
         "    $exeToLaunch = Join-Path $appDir 'android_vcam_gui.exe'\r\n"
         "}\r\n"

@@ -1,4 +1,4 @@
-package com.jcast.android.companion;
+package com.tjcap.android.companion;
 
 import java.io.IOException;
 import java.io.InputStream;

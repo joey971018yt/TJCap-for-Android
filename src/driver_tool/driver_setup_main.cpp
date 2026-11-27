@@ -236,7 +236,7 @@ int ConfigureAndroidAoaUpperFilters(bool attach_filter) {
 
 void UnblockRuntimeFiles(const std::filesystem::path& base_dir) {
     const wchar_t* kRelFiles[] = {
-        L"JCast for Android.exe",
+        L"TJCap for Android.exe",
         L"android_vcam_gui.exe",
         L"android_vcam_dshow.dll",
         L"android_vcam_host.exe",
@@ -245,11 +245,11 @@ void UnblockRuntimeFiles(const std::filesystem::path& base_dir) {
         L"runtime\\adb.exe",
         L"runtime\\AdbWinApi.dll",
         L"runtime\\AdbWinUsbApi.dll",
-        L"runtime\\jcast-server.jar",
+        L"runtime\\tjcap-server.jar",
         L"runtime\\libusb-1.0.dll",
         L"drivers\\libusb0.sys",
         L"drivers\\libusb0.dll",
-        L"companion\\JCast-Companion-v1.0.0.apk",
+        L"companion\\TJCap-Companion-v1.0.0.apk",
     };
     for (const wchar_t* rel : kRelFiles) {
         std::wstring ads = (base_dir / rel).wstring() + L":Zone.Identifier";
@@ -317,7 +317,7 @@ bool ManageDirectShowDll(const std::filesystem::path& dll_path, bool register_se
         return false;
     }
     std::cout << "[DirectShow] " << (register_server ? "Registered" : "Unregistered")
-              << " 'JCast for Android (Video)' & 'JCast for Android (Audio)' ("
+              << " 'TJCap for Android (Video)' & 'TJCap for Android (Audio)' ("
               << WideToUtf8(dll_path.filename().wstring()) << ").\n";
     return true;
 }
@@ -348,7 +348,7 @@ int main(int argc, char** argv) {
             status_only = true;
         } else if (arg == "--help" || arg == "-h") {
             std::cout
-                << "JCast for Android — Virtual Capture Card, ADB & USB AOA Driver Setup\n"
+                << "TJCap for Android — Virtual Capture Card, ADB & USB AOA Driver Setup\n"
                 << "Usage:\n"
                 << "  android_vcam_driver_setup.exe --install     Register DirectShow DLL, ADB & AOA UpperFilter\n"
                 << "  android_vcam_driver_setup.exe --uninstall   Remove AOA UpperFilter, stop ADB & unregister DLL\n"
@@ -382,7 +382,7 @@ int main(int argc, char** argv) {
     std::filesystem::path adb_exe = android_vcam::ResolveBundledAdbPath(base_dir);
 
     if (do_install) {
-        std::cout << "=== Installing JCast for Android (ADB + USB AOA Dual-Mode) ===\n";
+        std::cout << "=== Installing TJCap for Android (ADB + USB AOA Dual-Mode) ===\n";
         UnblockRuntimeFiles(base_dir);
         bool dshow_ok = ManageDirectShowDll(dshow_dll, true);
         if (InstallLibUsb0KernelService(drivers_dir)) {
@@ -395,7 +395,7 @@ int main(int argc, char** argv) {
     }
 
     if (do_uninstall) {
-        std::cout << "=== Uninstalling JCast for Android ===\n";
+        std::cout << "=== Uninstalling TJCap for Android ===\n";
         ConfigureAndroidAoaUpperFilters(false);
         RunQuietAdbAction(adb_exe, L"kill-server");
         ManageDirectShowDll(dshow_dll, false);

@@ -1,4 +1,4 @@
-package com.jcast.android.companion;
+package com.tjcap.android.companion;
 
 import android.Manifest;
 import android.app.Activity;
@@ -30,7 +30,7 @@ public final class MainActivity extends Activity {
 
     private static final int REQ_RECORD_AUDIO = 1001;
     private static final int REQ_MEDIA_PROJECTION = 1002;
-    private static final String ACTION_USB_PERMISSION = "com.jcast.android.companion.USB_PERMISSION";
+    private static final String ACTION_USB_PERMISSION = "com.tjcap.android.companion.USB_PERMISSION";
 
     private TextView txtAccessoryBadge;
     private TextView txtServiceStatus;
@@ -45,8 +45,8 @@ public final class MainActivity extends Activity {
             if (intent == null) return;
             String act = intent.getAction();
             if (UsbManager.ACTION_USB_ACCESSORY_DETACHED.equals(act)) {
-                Intent stopSvc = new Intent(MainActivity.this, JCastCaptureService.class);
-                stopSvc.setAction(JCastCaptureService.ACTION_STOP);
+                Intent stopSvc = new Intent(MainActivity.this, TJCapCaptureService.class);
+                stopSvc.setAction(TJCapCaptureService.ACTION_STOP);
                 startService(stopSvc);
             }
             refreshUiState();
@@ -98,7 +98,7 @@ public final class MainActivity extends Activity {
 
     private void registerReceiversCompat() {
         IntentFilter filter = new IntentFilter();
-        filter.addAction(JCastCaptureService.ACTION_STATE_BROADCAST);
+        filter.addAction(TJCapCaptureService.ACTION_STATE_BROADCAST);
         filter.addAction(ACTION_USB_PERMISSION);
         filter.addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED);
@@ -142,14 +142,14 @@ public final class MainActivity extends Activity {
         headerCard.setBackground(roundedBox("#0E291E", "#10B981", 16, this));
 
         TextView title = new TextView(this);
-        title.setText("JCast Companion");
+        title.setText("TJCap Companion");
         title.setTextColor(Color.parseColor("#34D399"));
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 23);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         headerCard.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("JCast for Android 專屬免開 USB 偵錯配件端 (v1.0.0)\n免 Root · 免開開發者選項 · USB-C 硬體 H.264 直傳");
+        sub.setText("TJCap for Android 專屬免開 USB 偵錯配件端 (v1.0.0)\n免 Root · 免開開發者選項 · USB-C 硬體 H.264 直傳");
         sub.setTextColor(Color.parseColor("#D1FAE5"));
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         sub.setPadding(0, dp(6), 0, 0);
@@ -227,7 +227,7 @@ public final class MainActivity extends Activity {
         TextView guideBody = new TextView(this);
         guideBody.setText(
                 "1. 用 USB-C 傳輸線將手機連接至 Windows 電腦。\n" +
-                "2. 在電腦開啟「JCast for Android」，連線模式選擇「🛡️ 免開 USB 偵錯模式 (Companion APK + USB AOA)」並點擊「🚀 智慧一鍵啟動」。\n" +
+                "2. 在電腦開啟「TJCap for Android」，連線模式選擇「🛡️ 免開 USB 偵錯模式 (Companion APK + USB AOA)」並點擊「🚀 智慧一鍵啟動」。\n" +
                 "3. 電腦會自動將手機切換為 AOA 高速配件並喚醒本 App，點擊上方綠色按鈕授權「開始錄製」即可直傳 OBS Studio！");
         guideBody.setTextColor(Color.parseColor("#D1FAE5"));
         guideBody.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
@@ -243,7 +243,7 @@ public final class MainActivity extends Activity {
     private void handleIncomingIntent(Intent intent) {
         if (intent != null && UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(intent.getAction())) {
             refreshUiState();
-            if (!JCastCaptureService.isRunning() && !autoPromptTriggered) {
+            if (!TJCapCaptureService.isRunning() && !autoPromptTriggered) {
                 autoPromptTriggered = true;
                 beginCaptureAuthorizationFlow();
             }
@@ -259,17 +259,17 @@ public final class MainActivity extends Activity {
 
     private void refreshUiState() {
         UsbAccessory acc = getAttachedAccessory();
-        boolean running = JCastCaptureService.isRunning();
+        boolean running = TJCapCaptureService.isRunning();
 
         if (acc != null) {
-            txtAccessoryBadge.setText("🟢 已連通電腦端 JCast USB-C 配件通道 (" + acc.getModel() + ")");
+            txtAccessoryBadge.setText("🟢 已連通電腦端 TJCap USB-C 配件通道 (" + acc.getModel() + ")");
             txtAccessoryBadge.setTextColor(Color.parseColor("#34D399"));
         } else {
             txtAccessoryBadge.setText("🔌 等待電腦端啟動「免開 USB 偵錯 (AOA)」模式...");
             txtAccessoryBadge.setTextColor(Color.parseColor("#FBBF24"));
         }
 
-        txtServiceStatus.setText("目前狀態：" + JCastCaptureService.getStatusText());
+        txtServiceStatus.setText("目前狀態：" + TJCapCaptureService.getStatusText());
 
         if (running) {
             btnStartStop.setText("■ 停止 USB-C 畫面直播傳輸");
@@ -285,9 +285,9 @@ public final class MainActivity extends Activity {
     }
 
     private void onPrimaryButtonClicked() {
-        if (JCastCaptureService.isRunning()) {
-            Intent stopIntent = new Intent(this, JCastCaptureService.class);
-            stopIntent.setAction(JCastCaptureService.ACTION_STOP);
+        if (TJCapCaptureService.isRunning()) {
+            Intent stopIntent = new Intent(this, TJCapCaptureService.class);
+            stopIntent.setAction(TJCapCaptureService.ACTION_STOP);
             startService(stopIntent);
             refreshUiState();
             return;
@@ -301,7 +301,7 @@ public final class MainActivity extends Activity {
         if (usbMgr == null || acc == null) {
             Toast.makeText(
                     this,
-                    "請先插上 USB-C 線，並在電腦端 JCast 選擇「免開 USB 偵錯模式 (AOA)」點擊啟動！",
+                    "請先插上 USB-C 線，並在電腦端 TJCap 選擇「免開 USB 偵錯模式 (AOA)」點擊啟動！",
                     Toast.LENGTH_LONG).show();
             return;
         }
@@ -315,7 +315,7 @@ public final class MainActivity extends Activity {
             }
             PendingIntent pi = PendingIntent.getBroadcast(this, 0, piIntent, flags);
             usbMgr.requestPermission(acc, pi);
-            Toast.makeText(this, "請在彈出視窗允許存取 JCast USB 配件，再點一次啟動", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "請在彈出視窗允許存取 TJCap USB 配件，再點一次啟動", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -355,11 +355,11 @@ public final class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
-                Intent svc = new Intent(this, JCastCaptureService.class);
-                svc.setAction(JCastCaptureService.ACTION_START);
-                svc.putExtra(JCastCaptureService.EXTRA_RESULT_CODE, resultCode);
-                svc.putExtra(JCastCaptureService.EXTRA_RESULT_DATA, data);
-                svc.putExtra(JCastCaptureService.EXTRA_ENABLE_AUDIO, chkAudio.isChecked());
+                Intent svc = new Intent(this, TJCapCaptureService.class);
+                svc.setAction(TJCapCaptureService.ACTION_START);
+                svc.putExtra(TJCapCaptureService.EXTRA_RESULT_CODE, resultCode);
+                svc.putExtra(TJCapCaptureService.EXTRA_RESULT_DATA, data);
+                svc.putExtra(TJCapCaptureService.EXTRA_ENABLE_AUDIO, chkAudio.isChecked());
                 if (Build.VERSION.SDK_INT >= 26) {
                     startForegroundService(svc);
                 } else {
