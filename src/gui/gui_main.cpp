@@ -1,0 +1,4399 @@
+#include "android_vcam/app_resource.h"
+#include "android_vcam/app_updater.h"
+#include "android_vcam/diagnostics.h"
+#include "android_vcam/dshow_guids.h"
+#include "android_vcam/image_convert.h"
+#include "android_vcam/screenshot_util.h"
+#include "android_vcam/shared_ipc.h"
+#include "android_vcam/usb_android_probe.h"
+#include "android_vcam/wasapi_renderer.h"
+
+#include <windows.h>
+#include <windowsx.h>
+#include <objbase.h>
+#include <commctrl.h>
+#include <dbt.h>
+#include <setupapi.h>
+#include <shellapi.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <cwchar>
+#include <cwctype>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+using namespace android_vcam;
+
+// Control IDs
+constexpr int kIdBtnSmartStart = 1001;
+constexpr int kIdBtnMockTest = 1002;
+constexpr int kIdBtnRepairDriver = 1003;
+constexpr int kIdBtnUninstall = 1004;
+constexpr int kIdBtnCopyObsGuide = 1005;
+constexpr int kIdBtnCheckUpdate = 1006;
+constexpr int kIdBtnPopoutMonitor = 1007;
+constexpr int kIdBtnScreenshot = 1008;
+constexpr int kIdBtnOpenScreenshots = 1009;
+constexpr int kIdComboResMode = 1010;
+constexpr int kIdComboStatusBar = 1011;
+constexpr int kIdComboAudioOut = 1012;
+constexpr int kIdChkHwDecode = 1013;
+constexpr int kIdChkInlinePreview = 1014;
+constexpr int kIdBtnDiagnostics = 1015;
+constexpr int kIdComboConnMode = 1016;
+constexpr int kIdBtnOpenApk = 1017;
+constexpr int kIdEditLog = 1020;
+
+constexpr UINT kWmAppendLog = WM_APP + 1;
+constexpr UINT kWmHostExited = WM_APP + 2;
+constexpr UINT kWmUpdateCheckDone = WM_APP + 3;
+constexpr UINT kWmHostDiagEvent = WM_APP + 4;
+constexpr UINT_PTR kTimerRefreshId = 1;
+constexpr UINT_PTR kTimerStartupUpdateId = 2;
+constexpr UINT_PTR kTimerPreviewId = 3;
+constexpr UINT_PTR kTimerTelemetryId = 4;
+
+enum class DshowRegState {
+    NotRegistered,
+    PathMismatch,
+    Ready,
+};
+
+enum class AndroidUsbState {
+    Unplugged,
+    PluggedNoUsbDebug,
+    PluggedUnauthorized,
+    PluggedOffline,
+    PluggedReady,
+};
+
+struct SystemHealth {
+    DshowRegState dshow = DshowRegState::NotRegistered;
+    bool adb_runtime_ok = false;
+    bool server_jar_ok = false;
+    bool mf_h264_ok = true;
+    AndroidUsbState android_usb = AndroidUsbState::Unplugged;
+    std::wstring android_device_desc;
+    std::vector<std::wstring> missing_core_files;
+    std::wstring os_version_desc;
+    std::wstring hw_summary_desc;
+};
+
+struct DiagEventRecord {
+    DiagCode code = DiagCode::None;
+    DiagSeverity severity = DiagSeverity::Error;
+    std::wstring timestamp_str;
+    std::wstring detail_wide;
+};
+
+struct ResOptionSpec {
+    uint32_t max_dim = 2560;
+    std::wstring mode_tag;  // e.g. L"native", L"1440p", L"1080p", L"720p"
+    std::wstring label;
+    std::wstring cli_args;
+};
+
+std::wstring FormatUsbSpeedBadgeWide(UsbLinkSpeed speed) {
+    switch (speed) {
+        case UsbLinkSpeed::SuperPlus_20Gbps:
+            return L"⚡ USB 3.2 Gen2x2 (20Gbps)｜已解鎖最高 3840p";
+        case UsbLinkSpeed::SuperPlus_10Gbps:
+            return L"⚡ USB 3.2 Gen2 (10Gbps)｜已解鎖最高 3840p";
+        case UsbLinkSpeed::Super_5Gbps:
+            return L"⚡ USB 3.0 (5Gbps)｜已解鎖最高 3840p";
+        case UsbLinkSpeed::High_480Mbps:
+            return L"🔌 USB 2.0 (480Mbps)｜最高可選 2K (2560p)";
+        case UsbLinkSpeed::Full_12Mbps:
+            return L"⚠️ USB 1.1 (12Mbps)｜最高可選 720p (1280p)";
+        case UsbLinkSpeed::Low_1_5Mbps:
+            return L"⚠️ USB 1.0 (1.5Mbps)｜最高可選 720p (1280p)";
+        default:
+            return L"";
+    }
+}
+
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+std::string WideToUtf8Str(std::wstring_view ws) {
+    if (ws.empty()) return {};
+    int n = WideCharToMultiByte(
+        CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string out(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+std::wstring CurrentLocalTimeShortWide() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t buf[32] = {0};
+    std::swprintf(buf, 32, L"%02u:%02u:%02u", st.wHour, st.wMinute, st.wSecond);
+    return buf;
+}
+
+bool CopyWideTextToClipboard(HWND owner, const std::wstring& text) {
+    if (!OpenClipboard(owner)) return false;
+    EmptyClipboard();
+    size_t cb = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, cb);
+    bool ok = false;
+    if (hMem) {
+        void* ptr = GlobalLock(hMem);
+        if (ptr) {
+            std::memcpy(ptr, text.c_str(), cb);
+            GlobalUnlock(hMem);
+            ok = (SetClipboardData(CF_UNICODETEXT, hMem) != nullptr);
+        }
+        if (!ok) {
+            GlobalFree(hMem);
+        }
+    }
+    CloseClipboard();
+    return ok;
+}
+
+std::wstring ToLowerWide(std::wstring s) {
+    for (wchar_t& c : s) c = static_cast<wchar_t>(std::towlower(c));
+    return s;
+}
+
+std::filesystem::path AppDir() {
+    wchar_t buf[MAX_PATH * 2] = {0};
+    GetModuleFileNameW(nullptr, buf, MAX_PATH * 2 - 1);
+    return std::filesystem::path(buf).parent_path();
+}
+
+void UnblockDownloadedFiles(const std::filesystem::path& base_dir) {
+    const wchar_t* rel_files[] = {
+        L"TJCap for Android.exe",
+        L"android_vcam_gui.exe",
+        L"android_vcam_dshow.dll",
+        L"android_vcam_host.exe",
+        L"android_vcam_driver_setup.exe",
+        L"android_vcam_tests.exe",
+        L"install_all_admin.ps1",
+        L"uninstall_all_admin.ps1",
+        L"runtime\\adb.exe",
+        L"runtime\\AdbWinApi.dll",
+        L"runtime\\AdbWinUsbApi.dll",
+        L"runtime\\tjcap-server.jar",
+    };
+    for (const wchar_t* rel : rel_files) {
+        std::wstring ads = (base_dir / rel).wstring() + L":Zone.Identifier";
+        DeleteFileW(ads.c_str());
+    }
+}
+
+SystemHealth ProbeSystemHealth(const std::filesystem::path& base_dir, bool query_adb_daemon = false) {
+    SystemHealth h;
+    std::error_code ec;
+
+    std::filesystem::path adb_exe = ResolveBundledAdbPath(base_dir);
+    std::filesystem::path jar_file = ResolveBundledServerJarPath(base_dir);
+    h.adb_runtime_ok = std::filesystem::exists(adb_exe, ec) &&
+                       std::filesystem::exists(adb_exe.parent_path() / L"AdbWinApi.dll", ec) &&
+                       std::filesystem::exists(adb_exe.parent_path() / L"AdbWinUsbApi.dll", ec);
+    h.server_jar_ok = std::filesystem::exists(jar_file, ec);
+
+    const wchar_t* kRequiredFiles[] = {
+        L"android_vcam_host.exe",
+        L"android_vcam_driver_setup.exe",
+        L"android_vcam_dshow.dll",
+    };
+    for (const wchar_t* req : kRequiredFiles) {
+        if (!std::filesystem::exists(base_dir / req, ec)) {
+            h.missing_core_files.emplace_back(req);
+        }
+    }
+    if (!h.adb_runtime_ok) {
+        h.missing_core_files.emplace_back(L"runtime\\adb.exe (+ AdbWinApi.dll / AdbWinUsbApi.dll)");
+    }
+    if (!h.server_jar_ok) {
+        h.missing_core_files.emplace_back(L"runtime\\tjcap-server.jar");
+    }
+
+    wchar_t sys_dir[MAX_PATH] = {0};
+    if (GetSystemDirectoryW(sys_dir, MAX_PATH) > 0) {
+        std::filesystem::path sp(sys_dir);
+        h.mf_h264_ok = std::filesystem::exists(sp / L"mfplat.dll", ec) &&
+                       std::filesystem::exists(sp / L"msmpeg2vdec.dll", ec);
+    }
+
+    {
+        struct RtlOsVersionInfoExW {
+            ULONG dwOSVersionInfoSize;
+            ULONG dwMajorVersion;
+            ULONG dwMinorVersion;
+            ULONG dwBuildNumber;
+            ULONG dwPlatformId;
+            WCHAR szCSDVersion[128];
+        };
+        using RtlGetVersionFn = LONG(WINAPI*)(RtlOsVersionInfoExW*);
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll) {
+            auto fn = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+            RtlOsVersionInfoExW ver{};
+            ver.dwOSVersionInfoSize = sizeof(ver);
+            if (fn && fn(&ver) == 0) {
+                const wchar_t* win_name = (ver.dwBuildNumber >= 22000) ? L"Windows 11" : L"Windows 10";
+                wchar_t obuf[96] = {0};
+                std::swprintf(
+                    obuf,
+                    96,
+                    L"%ls (%lu.%lu Build %lu x64)",
+                    win_name,
+                    ver.dwMajorVersion,
+                    ver.dwMinorVersion,
+                    ver.dwBuildNumber);
+                h.os_version_desc = obuf;
+            }
+        }
+        SYSTEM_INFO si{};
+        GetNativeSystemInfo(&si);
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof(ms);
+        GlobalMemoryStatusEx(&ms);
+        wchar_t hwbuf[96] = {0};
+        std::swprintf(
+            hwbuf,
+            96,
+            L"%lu 邏輯核心 ｜ 記憶體 %.1f / %.1f GB 可用",
+            si.dwNumberOfProcessors,
+            static_cast<double>(ms.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0),
+            static_cast<double>(ms.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0));
+        h.hw_summary_desc = hwbuf;
+    }
+
+    const wchar_t* kRegPath = L"CLSID\\{9F85B3C1-6D2A-4E94-AB52-3E7D9E81F201}\\InprocServer32";
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, kRegPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t reg_dll[MAX_PATH * 2] = {0};
+        DWORD cb = sizeof(reg_dll) - sizeof(wchar_t);
+        DWORD type = 0;
+        if (RegQueryValueExW(hKey, nullptr, nullptr, &type, reinterpret_cast<BYTE*>(reg_dll), &cb) == ERROR_SUCCESS) {
+            std::filesystem::path expected = std::filesystem::weakly_canonical(base_dir / L"android_vcam_dshow.dll", ec);
+            std::filesystem::path actual = std::filesystem::weakly_canonical(std::filesystem::path(reg_dll), ec);
+            if (ToLowerWide(expected.wstring()) == ToLowerWide(actual.wstring()) &&
+                std::filesystem::exists(actual, ec)) {
+                h.dshow = DshowRegState::Ready;
+            } else {
+                h.dshow = DshowRegState::PathMismatch;
+            }
+        }
+        RegCloseKey(hKey);
+    }
+
+    bool any_android_usb = false;
+    bool adb_iface_present = false;
+    std::string hw_desc;
+    ProbeConnectedAndroidLinkSpeed(nullptr, &any_android_usb, &adb_iface_present, &hw_desc);
+    h.android_device_desc = Utf8ToWide(hw_desc);
+
+    if (!any_android_usb) {
+        h.android_usb = AndroidUsbState::Unplugged;
+    } else if (!adb_iface_present) {
+        h.android_usb = AndroidUsbState::PluggedNoUsbDebug;
+    } else {
+        h.android_usb = AndroidUsbState::PluggedReady;
+        if (query_adb_daemon && h.adb_runtime_ok) {
+            std::vector<AdbDeviceEntry> devs;
+            if (QueryConnectedAdbDevices(adb_exe, devs, nullptr, 900U)) {
+                bool saw_auth = false;
+                bool saw_unauth = false;
+                bool saw_offline = false;
+                for (const auto& d : devs) {
+                    if (d.is_wireless) continue;
+                    if (d.state == AdbDeviceState::Authorized) {
+                        saw_auth = true;
+                        if (!d.model.empty()) {
+                            h.android_device_desc = Utf8ToWide(d.model);
+                        }
+                        break;
+                    } else if (d.state == AdbDeviceState::Unauthorized) {
+                        saw_unauth = true;
+                    } else if (d.state == AdbDeviceState::Offline || d.state == AdbDeviceState::NoPermissions) {
+                        saw_offline = true;
+                    }
+                }
+                if (saw_auth) {
+                    h.android_usb = AndroidUsbState::PluggedReady;
+                } else if (saw_unauth) {
+                    h.android_usb = AndroidUsbState::PluggedUnauthorized;
+                } else if (saw_offline) {
+                    h.android_usb = AndroidUsbState::PluggedOffline;
+                }
+            }
+        }
+    }
+
+    return h;
+}
+
+std::wstring NormalizeLineEndingsCrlf(std::string_view utf8_text) {
+    std::string norm;
+    norm.reserve(utf8_text.size() + 64);
+    for (size_t i = 0; i < utf8_text.size(); ++i) {
+        char c = utf8_text[i];
+        if (c == '\r') {
+            norm.push_back('\r');
+            norm.push_back('\n');
+            if (i + 1 < utf8_text.size() && utf8_text[i + 1] == '\n') {
+                ++i;
+            }
+        } else if (c == '\n') {
+            norm.push_back('\r');
+            norm.push_back('\n');
+        } else {
+            norm.push_back(c);
+        }
+    }
+    return Utf8ToWide(norm);
+}
+
+std::wstring FormatBytesMb(uint64_t bytes) {
+    wchar_t buf[64] = {0};
+    double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+    std::swprintf(buf, 64, L"%.2f MB", mb);
+    return buf;
+}
+
+void OpenSafeGitHubWebUrl(HWND hwnd, const std::string& candidate_utf8) {
+    const std::wstring fallback =
+        L"https://github.com/" ANDROID_VCAM_GITHUB_OWNER_W L"/" ANDROID_VCAM_GITHUB_REPO_W L"/releases/latest";
+    std::wstring wurl = Utf8ToWide(candidate_utf8);
+    std::wstring low = ToLowerWide(wurl);
+    if (low.rfind(L"https://github.com/", 0) != 0) {
+        wurl = fallback;
+    }
+    ShellExecuteW(hwnd, L"open", wurl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+class UpdateModalWindow {
+public:
+    UpdateModalWindow(
+        HINSTANCE hinst,
+        HWND parent,
+        std::filesystem::path app_dir,
+        const UpdateCheckResult& info,
+        UINT dpi,
+        HFONT font_normal,
+        HFONT font_bold,
+        HFONT font_title,
+        HFONT font_mono,
+        HICON icon_small,
+        std::function<void()> on_stop_capture)
+        : hinst_(hinst),
+          parent_(parent),
+          app_dir_(std::move(app_dir)),
+          info_(info),
+          dpi_(dpi),
+          font_normal_(font_normal),
+          font_bold_(font_bold),
+          font_title_(font_title),
+          font_mono_(font_mono),
+          icon_small_(icon_small),
+          on_stop_capture_(std::move(on_stop_capture)) {
+        bool installed_mode = IsInstalledAppMode(app_dir_);
+        if (installed_mode && !info_.latest.setup_exe.browser_download_url.empty()) {
+            use_setup_exe_ = true;
+            target_asset_ = info_.latest.setup_exe;
+        } else if (!installed_mode && !info_.latest.portable_zip.browser_download_url.empty()) {
+            use_setup_exe_ = false;
+            target_asset_ = info_.latest.portable_zip;
+        } else if (!info_.latest.setup_exe.browser_download_url.empty()) {
+            use_setup_exe_ = true;
+            target_asset_ = info_.latest.setup_exe;
+        } else if (!info_.latest.portable_zip.browser_download_url.empty()) {
+            use_setup_exe_ = false;
+            target_asset_ = info_.latest.portable_zip;
+        }
+    }
+
+    ~UpdateModalWindow() {
+        cancel_flag_.store(true, std::memory_order_relaxed);
+        if (dl_thread_.joinable()) {
+            dl_thread_.join();
+        }
+    }
+
+    bool RunModal() {
+        static bool class_registered = false;
+        const wchar_t* kClsName = L"TJCapUpdateModalWndClass";
+        if (!class_registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = &UpdateModalWindow::StaticDlgProc;
+            wc.hInstance = hinst_;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+            wc.lpszClassName = kClsName;
+            RegisterClassExW(&wc);
+            class_registered = true;
+        }
+
+        int dlg_w = MulDiv(590, static_cast<int>(dpi_), 96);
+        int dlg_h = MulDiv(450, static_cast<int>(dpi_), 96);
+
+        RECT prc{};
+        GetWindowRect(parent_, &prc);
+        int pos_x = prc.left + ((prc.right - prc.left) - dlg_w) / 2;
+        int pos_y = prc.top + ((prc.bottom - prc.top) - dlg_h) / 2;
+
+        std::wstring title = L"TJCap for Android — 發現新版本 " + Utf8ToWide(info_.latest.tag_name);
+        EnableWindow(parent_, FALSE);
+
+        dlg_hwnd_ = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            kClsName,
+            title.c_str(),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
+            pos_x,
+            pos_y,
+            dlg_w,
+            dlg_h,
+            parent_,
+            nullptr,
+            hinst_,
+            this);
+
+        if (!dlg_hwnd_) {
+            EnableWindow(parent_, TRUE);
+            return false;
+        }
+
+        if (icon_small_) {
+            SendMessageW(dlg_hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon_small_));
+        }
+
+        ShowWindow(dlg_hwnd_, SW_SHOWNORMAL);
+        UpdateWindow(dlg_hwnd_);
+
+        MSG msg{};
+        while (!modal_done_ && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (!IsDialogMessageW(dlg_hwnd_, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        if (dl_thread_.joinable()) {
+            dl_thread_.join();
+        }
+
+        EnableWindow(parent_, TRUE);
+        if (IsWindow(dlg_hwnd_)) {
+            DestroyWindow(dlg_hwnd_);
+            dlg_hwnd_ = nullptr;
+        }
+        SetForegroundWindow(parent_);
+        return update_launched_;
+    }
+
+private:
+    static constexpr int kIdDlgBtnDownload = 2001;
+    static constexpr int kIdDlgBtnOpenWeb = 2002;
+    static constexpr int kIdDlgBtnCancel = 2003;
+    static constexpr int kIdDlgEditNotes = 2004;
+    static constexpr int kIdDlgProgress = 2005;
+
+    static constexpr UINT kWmDlgProgress = WM_APP + 10;
+    static constexpr UINT kWmDlgFinished = WM_APP + 11;
+
+    int S(int px) const {
+        return MulDiv(px, static_cast<int>(dpi_), 96);
+    }
+
+    void BuildDialogControls() {
+        RECT rc{};
+        GetClientRect(dlg_hwnd_, &rc);
+        int cw = rc.right - rc.left;
+        int ch = rc.bottom - rc.top;
+        int pad = S(16);
+        int inner_w = cw - pad * 2;
+
+        std::wstring hdr = L"🎉 發現新版本：" + Utf8ToWide(info_.latest.title);
+        HWND lbl_hdr = CreateWindowExW(
+            0, L"STATIC", hdr.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS,
+            pad, S(14), inner_w, S(26), dlg_hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_hdr, WM_SETFONT, reinterpret_cast<WPARAM>(font_title_), TRUE);
+
+        std::wstring pkg_desc;
+        if (!target_asset_.browser_download_url.empty()) {
+            pkg_desc = (use_setup_exe_ ? L"安裝版自動升級 (" : L"便攜版原地自動更新 (") +
+                       Utf8ToWide(target_asset_.name) + L", " + FormatBytesMb(target_asset_.size_bytes) +
+                       (target_asset_.sha256_hex.empty() ? L")" : L", 含 SHA-256 驗證)");
+        } else {
+            pkg_desc = L"請開啟 GitHub Releases 網頁下載更新檔案";
+        }
+        std::wstring sub = L"目前版本：v" ANDROID_VCAM_VER_DISPLAY_WSTR L"  ➔  最新版本：" +
+                           Utf8ToWide(info_.latest.tag_name) + L"  ｜  " + pkg_desc;
+        HWND lbl_sub = CreateWindowExW(
+            0, L"STATIC", sub.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS,
+            pad, S(44), inner_w, S(22), dlg_hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_sub, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        HWND lbl_notes = CreateWindowExW(
+            0, L"STATIC", L"版本更新日誌 (GitHub Release Notes)：",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            pad, S(72), inner_w, S(20), dlg_hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_notes, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+
+        int notes_top = S(96);
+        int notes_h = ch - notes_top - S(116);
+        edit_notes_ = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            pad, notes_top, inner_w, std::max(S(100), notes_h),
+            dlg_hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdDlgEditNotes)), hinst_, nullptr);
+        SendMessageW(edit_notes_, WM_SETFONT, reinterpret_cast<WPARAM>(font_mono_), TRUE);
+        std::wstring notes_w = info_.latest.body_markdown.empty()
+                                   ? L"（此版本未附帶詳細文字說明，請點擊「開啟 GitHub 發布頁」查看。）"
+                                   : NormalizeLineEndingsCrlf(info_.latest.body_markdown);
+        SetWindowTextW(edit_notes_, notes_w.c_str());
+
+        int prog_y = ch - S(106);
+        progress_bar_ = CreateWindowExW(
+            0, PROGRESS_CLASSW, nullptr,
+            WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+            pad, prog_y, inner_w, S(20),
+            dlg_hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdDlgProgress)), hinst_, nullptr);
+        SendMessageW(progress_bar_, PBM_SETRANGE32, 0, 1000);
+        SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
+
+        lbl_status_ = CreateWindowExW(
+            0, L"STATIC", L"準備就緒 — 點擊下方按鈕即可自動從 GitHub 下載並完成升級。",
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS,
+            pad, prog_y + S(24), inner_w, S(20), dlg_hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_status_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        int btn_y = ch - S(50);
+        int gap = S(10);
+        int w_dl = (inner_w - gap * 2) * 46 / 100;
+        int w_web = (inner_w - gap * 2) * 30 / 100;
+        int w_can = inner_w - gap * 2 - w_dl - w_web;
+
+        btn_download_ = CreateWindowExW(
+            0, L"BUTTON", L"🚀 一鍵下載並自動更新",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            pad, btn_y, w_dl, S(36),
+            dlg_hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdDlgBtnDownload)), hinst_, nullptr);
+        SendMessageW(btn_download_, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+        if (target_asset_.browser_download_url.empty()) {
+            EnableWindow(btn_download_, FALSE);
+        }
+
+        btn_web_ = CreateWindowExW(
+            0, L"BUTTON", L"🌐 開啟 GitHub 發布頁",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            pad + w_dl + gap, btn_y, w_web, S(36),
+            dlg_hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdDlgBtnOpenWeb)), hinst_, nullptr);
+        SendMessageW(btn_web_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        btn_cancel_ = CreateWindowExW(
+            0, L"BUTTON", L"稍後再說",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            pad + w_dl + gap + w_web + gap, btn_y, w_can, S(36),
+            dlg_hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdDlgBtnCancel)), hinst_, nullptr);
+        SendMessageW(btn_cancel_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+    }
+
+    void StartDownloadWorker() {
+        if (downloading_ || target_asset_.browser_download_url.empty()) return;
+
+        wchar_t tmp_buf[MAX_PATH * 2] = {0};
+        DWORD n = GetTempPathW(MAX_PATH * 2 - 1, tmp_buf);
+        std::filesystem::path tmp_dir = (n > 0) ? std::filesystem::path(tmp_buf) : app_dir_;
+        tmp_dir /= L"TJCap_For_Android_Update";
+        std::filesystem::path safe_leaf = std::filesystem::path(Utf8ToWide(target_asset_.name)).filename();
+        if (safe_leaf.empty()) safe_leaf = use_setup_exe_ ? L"TJCap-Update-Setup.exe" : L"TJCap-Update-Portable.zip";
+        downloaded_file_ = tmp_dir / safe_leaf;
+
+        downloading_ = true;
+        cancel_flag_.store(false, std::memory_order_relaxed);
+        EnableWindow(btn_download_, FALSE);
+        SetWindowTextW(btn_cancel_, L"取消下載");
+        SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
+        SetWindowTextW(lbl_status_, L"正在連線至 GitHub Releases 伺服器...");
+
+        if (dl_thread_.joinable()) {
+            dl_thread_.join();
+        }
+
+        ReleaseAssetInfo asset_copy = target_asset_;
+        std::filesystem::path dst_copy = downloaded_file_;
+        HWND target_hwnd = dlg_hwnd_;
+
+        dl_thread_ = std::thread([this, asset_copy, dst_copy, target_hwnd]() {
+            std::string err;
+            uint64_t last_ui_tick = 0;
+            bool ok = DownloadReleaseAssetHttps(
+                asset_copy,
+                dst_copy,
+                &cancel_flag_,
+                [&](uint64_t done, uint64_t total) {
+                    uint64_t now = GetTickCount64();
+                    if (done < total && now - last_ui_tick < 60) return;
+                    last_ui_tick = now;
+
+                    int permille = (total > 0)
+                                       ? static_cast<int>(std::min<uint64_t>(1000ULL, (done * 1000ULL) / total))
+                                       : 0;
+                    std::wstring msg;
+                    if (total > 0) {
+                        int pct = permille / 10;
+                        msg = L"正在下載更新包... " + std::to_wstring(pct) + L"% (" +
+                              FormatBytesMb(done) + L" / " + FormatBytesMb(total) + L")";
+                    } else {
+                        msg = L"正在下載更新包... 已接收 " + FormatBytesMb(done);
+                    }
+                    auto* heap_msg = new std::wstring(std::move(msg));
+                    if (!PostMessageW(
+                            target_hwnd,
+                            kWmDlgProgress,
+                            static_cast<WPARAM>(permille),
+                            reinterpret_cast<LPARAM>(heap_msg))) {
+                        delete heap_msg;
+                    }
+                },
+                &err);
+
+            auto* heap_err = new std::wstring(Utf8ToWide(err));
+            if (!PostMessageW(
+                    target_hwnd,
+                    kWmDlgFinished,
+                    ok ? 1 : 0,
+                    reinterpret_cast<LPARAM>(heap_err))) {
+                delete heap_err;
+            }
+        });
+    }
+
+    void RequestCloseOrCancel() {
+        if (downloading_) {
+            cancel_flag_.store(true, std::memory_order_relaxed);
+            close_after_cancel_ = true;
+            EnableWindow(btn_cancel_, FALSE);
+            SetWindowTextW(lbl_status_, L"正在取消下載，請稍候...");
+        } else {
+            modal_done_ = true;
+        }
+    }
+
+    static LRESULT CALLBACK StaticDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        UpdateModalWindow* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = static_cast<UpdateModalWindow*>(cs->lpCreateParams);
+            self->dlg_hwnd_ = hwnd;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<UpdateModalWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        }
+        return self ? self->DlgProc(msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT DlgProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+        switch (msg) {
+            case WM_CREATE:
+                BuildDialogControls();
+                return 0;
+
+            case WM_CTLCOLORSTATIC: {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                HWND ctrl = reinterpret_cast<HWND>(lParam);
+                if (ctrl != edit_notes_) {
+                    SetBkMode(hdc, TRANSPARENT);
+                    return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+                }
+                break;
+            }
+
+            case WM_COMMAND: {
+                int id = LOWORD(wParam);
+                int code = HIWORD(wParam);
+                if (code == BN_CLICKED) {
+                    if (id == kIdDlgBtnDownload) {
+                        StartDownloadWorker();
+                        return 0;
+                    }
+                    if (id == kIdDlgBtnOpenWeb) {
+                        OpenSafeGitHubWebUrl(dlg_hwnd_, info_.latest.html_url);
+                        return 0;
+                    }
+                    if (id == kIdDlgBtnCancel || id == IDCANCEL) {
+                        RequestCloseOrCancel();
+                        return 0;
+                    }
+                }
+                break;
+            }
+
+            case kWmDlgProgress: {
+                auto* str = reinterpret_cast<std::wstring*>(lParam);
+                SendMessageW(progress_bar_, PBM_SETPOS, wParam, 0);
+                if (str) {
+                    SetWindowTextW(lbl_status_, str->c_str());
+                    delete str;
+                }
+                return 0;
+            }
+
+            case kWmDlgFinished: {
+                auto* err_str = reinterpret_cast<std::wstring*>(lParam);
+                std::wstring err_msg = err_str ? *err_str : L"";
+                delete err_str;
+
+                if (dl_thread_.joinable()) {
+                    dl_thread_.join();
+                }
+                downloading_ = false;
+
+                if (close_after_cancel_) {
+                    modal_done_ = true;
+                    return 0;
+                }
+
+                if (wParam == 1) {
+                    SendMessageW(progress_bar_, PBM_SETPOS, 1000, 0);
+                    SetWindowTextW(lbl_status_, L"✅ 下載與雜湊驗證完成！正在啟動自動升級程序...");
+                    UpdateWindow(dlg_hwnd_);
+
+                    if (on_stop_capture_) {
+                        on_stop_capture_();
+                    }
+
+                    std::string launch_err;
+                    bool launched = use_setup_exe_
+                                        ? LaunchInstallerUpdate(downloaded_file_, dlg_hwnd_, &launch_err)
+                                        : LaunchPortableZipSelfUpdate(
+                                              downloaded_file_, app_dir_, GetCurrentProcessId(), &launch_err);
+                    if (launched) {
+                        update_launched_ = true;
+                        modal_done_ = true;
+                        return 0;
+                    }
+
+                    std::wstring w_lerr = Utf8ToWide(launch_err);
+                    SetWindowTextW(lbl_status_, (L"⚠️ " + w_lerr).c_str());
+                    EnableWindow(btn_download_, TRUE);
+                    EnableWindow(btn_cancel_, TRUE);
+                    SetWindowTextW(btn_cancel_, L"關閉");
+                } else {
+                    std::wstring fail_txt = L"❌ " + (err_msg.empty() ? L"下載失敗" : err_msg);
+                    SetWindowTextW(lbl_status_, fail_txt.c_str());
+                    EnableWindow(btn_download_, TRUE);
+                    EnableWindow(btn_cancel_, TRUE);
+                    SetWindowTextW(btn_cancel_, L"關閉");
+                    if (!cancel_flag_.load(std::memory_order_relaxed)) {
+                        MessageBoxW(dlg_hwnd_, fail_txt.c_str(), L"下載更新失敗", MB_ICONWARNING | MB_OK);
+                    }
+                }
+                return 0;
+            }
+
+            case WM_CLOSE:
+                RequestCloseOrCancel();
+                return 0;
+        }
+        return DefWindowProcW(hwnd_or_dlg(), msg, wParam, lParam);
+    }
+
+    HWND hwnd_or_dlg() const { return dlg_hwnd_; }
+
+    HINSTANCE hinst_ = nullptr;
+    HWND parent_ = nullptr;
+    HWND dlg_hwnd_ = nullptr;
+    std::filesystem::path app_dir_;
+    UpdateCheckResult info_;
+    UINT dpi_ = 96;
+
+    HFONT font_normal_ = nullptr;
+    HFONT font_bold_ = nullptr;
+    HFONT font_title_ = nullptr;
+    HFONT font_mono_ = nullptr;
+    HICON icon_small_ = nullptr;
+    std::function<void()> on_stop_capture_;
+
+    bool use_setup_exe_ = true;
+    ReleaseAssetInfo target_asset_;
+    std::filesystem::path downloaded_file_;
+
+    HWND edit_notes_ = nullptr;
+    HWND progress_bar_ = nullptr;
+    HWND lbl_status_ = nullptr;
+    HWND btn_download_ = nullptr;
+    HWND btn_web_ = nullptr;
+    HWND btn_cancel_ = nullptr;
+
+    std::atomic<bool> cancel_flag_{false};
+    bool downloading_ = false;
+    bool close_after_cancel_ = false;
+    bool modal_done_ = false;
+    bool update_launched_ = false;
+    std::thread dl_thread_;
+};
+
+class DiagnosticsModalWindow {
+public:
+    DiagnosticsModalWindow(
+        HINSTANCE hinst,
+        HWND parent,
+        std::filesystem::path app_dir,
+        UINT dpi,
+        HFONT font_normal,
+        HFONT font_bold,
+        HFONT font_title,
+        HFONT font_mono,
+        HICON icon_small,
+        UsbLinkSpeed usb_speed,
+        const StreamHealthSnapshot& telem,
+        std::vector<DiagEventRecord> faults,
+        std::wstring raw_log_text,
+        std::function<SystemHealth()> query_health,
+        std::function<bool()> on_repair_driver,
+        std::function<void()> on_clear_faults)
+        : hinst_(hinst),
+          parent_(parent),
+          app_dir_(std::move(app_dir)),
+          dpi_(dpi),
+          font_normal_(font_normal),
+          font_bold_(font_bold),
+          font_title_(font_title),
+          font_mono_(font_mono),
+          icon_small_(icon_small),
+          usb_speed_(usb_speed),
+          telem_(telem),
+          faults_(std::move(faults)),
+          raw_log_text_(std::move(raw_log_text)),
+          query_health_(std::move(query_health)),
+          on_repair_driver_(std::move(on_repair_driver)),
+          on_clear_faults_(std::move(on_clear_faults)) {}
+
+    void RunModal() {
+        const wchar_t* kClassName = L"TJCapDiagnosticsModalWndClass";
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.style = CS_HREDRAW | CS_VREDRAW;
+            wc.lpfnWndProc = &DiagnosticsModalWindow::StaticWndProc;
+            wc.hInstance = hinst_;
+            wc.hIcon = icon_small_ ? icon_small_ : LoadIconW(nullptr, IDI_APPLICATION);
+            wc.hIconSm = wc.hIcon;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+            wc.lpszClassName = kClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        int win_w = MulDiv(780, static_cast<int>(dpi_), 96);
+        int win_h = MulDiv(580, static_cast<int>(dpi_), 96);
+
+        RECT prc{};
+        GetWindowRect(parent_, &prc);
+        int pos_x = prc.left + ((prc.right - prc.left) - win_w) / 2;
+        int pos_y = prc.top + ((prc.bottom - prc.top) - win_h) / 2;
+
+        EnableWindow(parent_, FALSE);
+
+        hwnd_ = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            kClassName,
+            L"TJCap for Android — 🩺 智慧故障偵測與一鍵診斷報錯中心",
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            pos_x,
+            pos_y,
+            win_w,
+            win_h,
+            parent_,
+            nullptr,
+            hinst_,
+            this);
+
+        if (!hwnd_) {
+            EnableWindow(parent_, TRUE);
+            return;
+        }
+
+        MSG msg{};
+        while (!modal_done_ && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (!IsDialogMessageW(hwnd_, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        if (msg.message == WM_QUIT) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+        }
+
+        EnableWindow(parent_, TRUE);
+        SetForegroundWindow(parent_);
+    }
+
+private:
+    static constexpr int kBtnRepair = 4001;
+    static constexpr int kBtnCopy = 4002;
+    static constexpr int kBtnSaveTxt = 4003;
+    static constexpr int kBtnGitHubIssue = 4004;
+    static constexpr int kBtnClose = 4005;
+
+    int S(int px) const { return MulDiv(px, static_cast<int>(dpi_), 96); }
+
+    void RebuildReportAndRefreshUi() {
+        SystemHealth h = query_health_ ? query_health_() : ProbeSystemHealth(app_dir_);
+        primary_code_ = DiagCode::None;
+        int issue_count = 0;
+
+        // Collect live environment codes if present
+        std::vector<DiagCode> active_codes;
+        auto push_unique_code = [&](DiagCode c) {
+            if (c == DiagCode::None) return;
+            if (std::find(active_codes.begin(), active_codes.end(), c) == active_codes.end()) {
+                active_codes.push_back(c);
+            }
+            if (primary_code_ == DiagCode::None) {
+                primary_code_ = c;
+            }
+        };
+
+        if (!h.missing_core_files.empty()) {
+            push_unique_code(DiagCode::E101_MissingCoreFiles);
+            ++issue_count;
+        }
+        if (!h.mf_h264_ok) {
+            push_unique_code(DiagCode::E103_MissingMediaFoundation);
+            ++issue_count;
+        }
+        if (h.dshow != DshowRegState::Ready) {
+            push_unique_code(DiagCode::E104_DshowNotRegistered);
+            ++issue_count;
+        }
+        if (h.android_usb == AndroidUsbState::PluggedNoUsbDebug) {
+            push_unique_code(DiagCode::E201_AndroidUsbDriverIssue);
+            ++issue_count;
+        } else if (h.android_usb == AndroidUsbState::PluggedUnauthorized) {
+            push_unique_code(DiagCode::E301_UsbDebugUnauthorized);
+            ++issue_count;
+        } else if (h.android_usb == AndroidUsbState::PluggedOffline) {
+            push_unique_code(DiagCode::E204_DeviceBusyOrOffline);
+            ++issue_count;
+        }
+
+        for (auto it = faults_.rbegin(); it != faults_.rend(); ++it) {
+            push_unique_code(it->code);
+        }
+        issue_count += static_cast<int>(faults_.size());
+
+        if (lbl_headline_) {
+            if (active_codes.empty()) {
+                SetWindowTextW(
+                    lbl_headline_,
+                    L"✅ 8 項系統環境自檢正常｜目前未偵測到錯誤碼（若仍遇異常可直接複製報告或前往 GitHub 回報）");
+            } else {
+                const auto& pspec = LookupDiagSpec(primary_code_);
+                std::wstring head = L"⚠️ 共偵測到 " + std::to_wstring(active_codes.size()) +
+                                    L" 項異常或提醒｜主要代碼：" + Utf8ToWide(pspec.code_str) + L"（" +
+                                    Utf8ToWide(pspec.title_utf8) + L"）";
+                SetWindowTextW(lbl_headline_, head.c_str());
+            }
+        }
+
+        // Synthesize full UTF-8 diagnostic report, then redact sensitive user paths & Android serials
+        std::string rpt;
+        rpt.reserve(8192);
+        rpt += "======================================================================\n";
+        rpt += "  TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_STR " — 系統環境自檢與故障診斷報錯單\n";
+        rpt += "======================================================================\n\n";
+
+        rpt += "【一、8 項系統環境與硬體全面自檢】\n";
+        rpt += "1. 作業系統環境  : " + (h.os_version_desc.empty() ? "Windows x64" : WideToUtf8Str(h.os_version_desc)) + "\n";
+        rpt += "2. 處理器與記憶體: " + WideToUtf8Str(h.hw_summary_desc) + "\n";
+        if (h.missing_core_files.empty()) {
+            rpt += "3. 核心檔案完整性: [PASS] 主程式、DirectShow 虛擬卡與內建 ADB/Server 皆完整\n";
+        } else {
+            rpt += "3. 核心檔案完整性: [FAIL] 缺少檔案: ";
+            for (size_t i = 0; i < h.missing_core_files.size(); ++i) {
+                if (i > 0) rpt += ", ";
+                rpt += WideToUtf8Str(h.missing_core_files[i]);
+            }
+            rpt += " (TJCAP-E101)\n";
+        }
+        rpt += std::string("4. 系統 H.264 元件: ") +
+               (h.mf_h264_ok ? "[PASS] Windows Media Foundation (mfplat / msmpeg2vdec) 正常\n"
+                             : "[FAIL] 缺少 Media Feature Pack H.264 解碼元件 (TJCAP-E103)\n");
+        rpt += std::string("5. 內建 ADB 引擎  : ") +
+               (h.adb_runtime_ok ? "[PASS] 內建免安裝 WinUSB ADB 通訊套件完整\n"
+                                 : "[FAIL] 缺少 runtime\\adb.exe 元件 (TJCAP-E101)\n");
+        rpt += std::string("6. 手機端微服務包: ") +
+               (h.server_jar_ok ? "[PASS] 內建免裝 APK 硬體編碼微服務 (tjcap-server.jar) 完整\n"
+                                : "[FAIL] 缺少 runtime\\tjcap-server.jar (TJCAP-E101)\n");
+        if (h.dshow == DshowRegState::Ready) {
+            rpt += "7. DirectShow 鏡頭: [PASS] TJCap for Android (Video/Audio) 註冊正常\n";
+        } else if (h.dshow == DshowRegState::PathMismatch) {
+            rpt += "7. DirectShow 鏡頭: [WARN] 資料夾路徑已變更，需重新註冊 (TJCAP-E104)\n";
+        } else {
+            rpt += "7. DirectShow 鏡頭: [WARN] 尚未註冊虛擬擷取卡 (TJCAP-E104)\n";
+        }
+
+        switch (h.android_usb) {
+            case AndroidUsbState::PluggedReady:
+                rpt += "8. Android USB-C : [PASS] 已連線並完成 USB 偵錯授權 (" +
+                       std::string(UsbLinkSpeedName(usb_speed_)) + ")\n";
+                break;
+            case AndroidUsbState::PluggedUnauthorized:
+                rpt += "8. Android USB-C : [WARN] 已插入手機，等待在手機螢幕點擊「允許 USB 偵錯」 (TJCAP-E301)\n";
+                break;
+            case AndroidUsbState::PluggedNoUsbDebug:
+                rpt += "8. Android USB-C : [WARN] 已偵測 USB 連線，但手機尚未開啟「開發者選項 -> USB 偵錯」 (TJCAP-E201)\n";
+                break;
+            case AndroidUsbState::PluggedOffline:
+                rpt += "8. Android USB-C : [WARN] ADB 裝置處於離線狀態，建議重插傳輸線 (TJCAP-E204)\n";
+                break;
+            case AndroidUsbState::Unplugged:
+                rpt += "8. Android USB-C : [INFO] 目前尚未插入 Android 手機 / 平板 USB-C\n";
+                break;
+        }
+        rpt += "\n【二、偵測到的錯誤碼解析與排除步驟】\n";
+        if (active_codes.empty()) {
+            rpt += "• 目前未偵測到異常錯誤碼。若您在 OBS 看不到畫面，請確認先點擊本程式「智慧一鍵啟動」再開啟 OBS。\n";
+        } else {
+            for (DiagCode dc : active_codes) {
+                const auto& sp = LookupDiagSpec(dc);
+                rpt += "----------------------------------------------------------------------\n";
+                rpt += std::string("▶ [") + sp.code_str + "] " + sp.title_utf8 + "\n";
+                rpt += std::string("  • 可能原因：") + sp.cause_utf8 + "\n";
+                rpt += "  • 排除步驟：\n";
+                std::string steps = sp.fix_steps_utf8;
+                size_t pos = 0;
+                while (pos < steps.size()) {
+                    size_t nl = steps.find('\n', pos);
+                    std::string one = (nl == std::string::npos) ? steps.substr(pos) : steps.substr(pos, nl - pos);
+                    rpt += "      " + one + "\n";
+                    if (nl == std::string::npos) break;
+                    pos = nl + 1;
+                }
+            }
+            rpt += "----------------------------------------------------------------------\n";
+        }
+
+        if (!faults_.empty()) {
+            rpt += "\n【三、近期捕捉到的執行期異常事件紀錄】\n";
+            for (const auto& ev : faults_) {
+                const auto& sp = LookupDiagSpec(ev.code);
+                rpt += "• [" + WideToUtf8Str(ev.timestamp_str) + "] " + sp.code_str + " — " +
+                       WideToUtf8Str(ev.detail_wide) + "\n";
+            }
+        }
+
+        rpt += "\n【四、即時串流健康度快照】\n";
+        if (telem_.active && !telem_.waiting_first_frame) {
+            char tbuf[256] = {0};
+            std::snprintf(
+                tbuf,
+                sizeof(tbuf),
+                "• 狀態: 串流中 (%ux%u) | FPS: %.1f | 碼率: %.1f Mbps (峰值 %.1fM) | 管線延遲: %.1f ms (純解碼 %.1f ms) | 加速: %s | 掉幀: %u\n",
+                telem_.frame_width,
+                telem_.frame_height,
+                telem_.fps,
+                telem_.bitrate_mbps,
+                telem_.peak_bitrate_mbps,
+                telem_.pipeline_latency_ms,
+                telem_.decode_latency_ms,
+                telem_.hw_accelerated ? "D3D11VA GPU" : "CPU SW",
+                telem_.dropped_frames);
+            rpt += tbuf;
+        } else if (telem_.waiting_first_frame) {
+            rpt += "• 狀態: 背景擷取程序已啟動，等待手機傳送首張影格中\n";
+        } else {
+            rpt += "• 狀態: 待機中（未啟動串流）\n";
+        }
+
+        rpt += "\n【五、近期執行日誌摘要（已自動隱私脫敏：隱藏本機帳號與裝置序號）】\n";
+        std::string raw_log_u8 = WideToUtf8Str(raw_log_text_);
+        if (raw_log_u8.size() > 5500) {
+            size_t cut = raw_log_u8.find('\n', raw_log_u8.size() - 5500);
+            raw_log_u8 = "...(前略)...\n" +
+                         ((cut != std::string::npos) ? raw_log_u8.substr(cut + 1)
+                                                     : raw_log_u8.substr(raw_log_u8.size() - 5500));
+        }
+        rpt += raw_log_u8;
+        if (!rpt.empty() && rpt.back() != '\n') rpt.push_back('\n');
+
+        redacted_report_utf8_ = RedactSensitiveReportText(rpt);
+        redacted_report_wide_ = NormalizeLineEndingsCrlf(redacted_report_utf8_);
+
+        if (edit_report_) {
+            SetWindowTextW(edit_report_, redacted_report_wide_.c_str());
+        }
+    }
+
+    void BuildDialogControls() {
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        int cw = rc.right - rc.left;
+        int ch = rc.bottom - rc.top;
+        int pad = S(16);
+        int inner_w = cw - pad * 2;
+
+        lbl_headline_ = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"正在執行 8 項系統環境與驅動深度自檢...",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            pad,
+            S(12),
+            inner_w,
+            S(26),
+            hwnd_,
+            nullptr,
+            hinst_,
+            nullptr);
+        SendMessageW(lbl_headline_, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+
+        HWND lbl_sub = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"🔒 隱私保護：下方診斷報告已自動隱藏您的電腦使用者帳號與手機序號，可安心複製或匯出回報。",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            pad,
+            S(38),
+            inner_w,
+            S(20),
+            hwnd_,
+            nullptr,
+            hinst_,
+            nullptr);
+        SendMessageW(lbl_sub, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        int edit_top = S(64);
+        int btn_h = S(34);
+        int btn_y = ch - pad - btn_h;
+        int status_y = btn_y - S(26);
+        int edit_h = std::max(S(140), status_y - S(6) - edit_top);
+
+        edit_report_ = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            pad,
+            edit_top,
+            inner_w,
+            edit_h,
+            hwnd_,
+            nullptr,
+            hinst_,
+            nullptr);
+        SendMessageW(edit_report_, WM_SETFONT, reinterpret_cast<WPARAM>(font_mono_), TRUE);
+        SendMessageW(edit_report_, EM_SETLIMITTEXT, 256 * 1024, 0);
+
+        lbl_feedback_ = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"提示：遇到問題時可先點「🔧 一鍵修復驅動」，或點「🐞 開啟 GitHub 回報問題」一鍵提交報錯單。",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            pad,
+            status_y,
+            inner_w,
+            S(22),
+            hwnd_,
+            nullptr,
+            hinst_,
+            nullptr);
+        SendMessageW(lbl_feedback_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        int gap = S(8);
+        int avail = inner_w - gap * 4;
+        int w_rep = avail * 21 / 100;
+        int w_cpy = avail * 21 / 100;
+        int w_sav = avail * 20 / 100;
+        int w_gh  = avail * 25 / 100;
+        int w_cls = avail - w_rep - w_cpy - w_sav - w_gh;
+        int x = pad;
+
+        HWND b1 = CreateWindowExW(
+            0, L"BUTTON", L"🔧 一鍵修復驅動", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            x, btn_y, w_rep, btn_h, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBtnRepair)), hinst_, nullptr);
+        SendMessageW(b1, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        x += w_rep + gap;
+
+        HWND b2 = CreateWindowExW(
+            0, L"BUTTON", L"📋 複製脫敏報告", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            x, btn_y, w_cpy, btn_h, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBtnCopy)), hinst_, nullptr);
+        SendMessageW(b2, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        x += w_cpy + gap;
+
+        HWND b3 = CreateWindowExW(
+            0, L"BUTTON", L"💾 匯出報錯檔 (.txt)", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            x, btn_y, w_sav, btn_h, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBtnSaveTxt)), hinst_, nullptr);
+        SendMessageW(b3, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        x += w_sav + gap;
+
+        HWND b4 = CreateWindowExW(
+            0, L"BUTTON", L"🐞 開啟 GitHub 回報問題", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            x, btn_y, w_gh, btn_h, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBtnGitHubIssue)), hinst_, nullptr);
+        SendMessageW(b4, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+        x += w_gh + gap;
+
+        HWND b5 = CreateWindowExW(
+            0, L"BUTTON", L"關閉", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            x, btn_y, w_cls, btn_h, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBtnClose)), hinst_, nullptr);
+        SendMessageW(b5, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        RebuildReportAndRefreshUi();
+    }
+
+    void ExportReportToTxt() {
+        std::filesystem::path diag_dir = GetDefaultScreenshotDirectory(app_dir_) / L"Diagnostics";
+        std::error_code ec;
+        std::filesystem::create_directories(diag_dir, ec);
+
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        wchar_t fname[96] = {0};
+        std::swprintf(
+            fname,
+            96,
+            L"TJCap_DiagReport_%04u%02u%02u_%02u%02u%02u.txt",
+            st.wYear,
+            st.wMonth,
+            st.wDay,
+            st.wHour,
+            st.wMinute,
+            st.wSecond);
+        std::filesystem::path out_path = diag_dir / fname;
+
+        std::ofstream ofs(out_path, std::ios::binary);
+        if (!ofs) {
+            SetWindowTextW(lbl_feedback_, L"❌ 無法寫入診斷檔案，請改用「📋 複製脫敏報告」。");
+            return;
+        }
+        const char kBom[3] = {'\xEF', '\xBB', '\xBF'};
+        ofs.write(kBom, 3);
+        ofs.write(redacted_report_utf8_.data(), static_cast<std::streamsize>(redacted_report_utf8_.size()));
+        ofs.close();
+
+        std::wstring msg = L"✅ 已儲存診斷報錯檔：" + out_path.wstring();
+        SetWindowTextW(lbl_feedback_, msg.c_str());
+        ShellExecuteW(hwnd_, L"open", diag_dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        DiagnosticsModalWindow* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = static_cast<DiagnosticsModalWindow*>(cs->lpCreateParams);
+            self->hwnd_ = hwnd;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<DiagnosticsModalWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        }
+        return self ? self->WndProc(msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+        switch (msg) {
+            case WM_CREATE:
+                BuildDialogControls();
+                return 0;
+
+            case WM_CTLCOLORSTATIC: {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                HWND ctrl = reinterpret_cast<HWND>(lParam);
+                if (ctrl != edit_report_) {
+                    SetBkMode(hdc, TRANSPARENT);
+                    return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+                }
+                break;
+            }
+
+            case WM_COMMAND: {
+                int id = LOWORD(wParam);
+                if (HIWORD(wParam) == BN_CLICKED) {
+                    if (id == kBtnRepair) {
+                        if (on_repair_driver_ && on_repair_driver_()) {
+                            if (on_clear_faults_) on_clear_faults_();
+                            faults_.clear();
+                            RebuildReportAndRefreshUi();
+                            SetWindowTextW(lbl_feedback_, L"✅ 已完成驅動與虛擬擷取卡修復，並重新整理自檢結果！");
+                        }
+                        return 0;
+                    }
+                    if (id == kBtnCopy) {
+                        if (CopyWideTextToClipboard(hwnd_, redacted_report_wide_)) {
+                            SetWindowTextW(lbl_feedback_, L"✅ 已將完整脫敏診斷報告複製到剪貼簿，可直接 Ctrl+V 貼上！");
+                        }
+                        return 0;
+                    }
+                    if (id == kBtnSaveTxt) {
+                        ExportReportToTxt();
+                        return 0;
+                    }
+                    if (id == kBtnGitHubIssue) {
+                        CopyWideTextToClipboard(hwnd_, redacted_report_wide_);
+                        std::string issue_url = BuildGitHubNewIssueUrl(
+                            ANDROID_VCAM_GITHUB_OWNER,
+                            ANDROID_VCAM_GITHUB_REPO,
+                            ANDROID_VCAM_VER_DISPLAY_STR,
+                            primary_code_,
+                            faults_.empty() ? "" : WideToUtf8Str(faults_.back().detail_wide));
+                        OpenSafeGitHubWebUrl(hwnd_, issue_url);
+                        SetWindowTextW(
+                            lbl_feedback_,
+                            L"✅ 已複製診斷報告並開啟 GitHub Issue 頁面，請於網頁內文區塊按 Ctrl+V 貼上提交！");
+                        return 0;
+                    }
+                    if (id == kBtnClose || id == IDCANCEL) {
+                        PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+                        return 0;
+                    }
+                }
+                break;
+            }
+
+            case WM_CLOSE:
+                modal_done_ = true;
+                DestroyWindow(hwnd_);
+                hwnd_ = nullptr;
+                return 0;
+        }
+        return DefWindowProcW(hwnd_, msg, wParam, lParam);
+    }
+
+    HINSTANCE hinst_ = nullptr;
+    HWND parent_ = nullptr;
+    HWND hwnd_ = nullptr;
+    std::filesystem::path app_dir_;
+    UINT dpi_ = 96;
+    HFONT font_normal_ = nullptr;
+    HFONT font_bold_ = nullptr;
+    HFONT font_title_ = nullptr;
+    HFONT font_mono_ = nullptr;
+    HICON icon_small_ = nullptr;
+
+    UsbLinkSpeed usb_speed_ = UsbLinkSpeed::Unknown;
+    StreamHealthSnapshot telem_{};
+    std::vector<DiagEventRecord> faults_;
+    std::wstring raw_log_text_;
+    std::function<SystemHealth()> query_health_;
+    std::function<bool()> on_repair_driver_;
+    std::function<void()> on_clear_faults_;
+
+    DiagCode primary_code_ = DiagCode::None;
+    std::string redacted_report_utf8_;
+    std::wstring redacted_report_wide_;
+
+    HWND lbl_headline_ = nullptr;
+    HWND edit_report_ = nullptr;
+    HWND lbl_feedback_ = nullptr;
+    bool modal_done_ = false;
+};
+
+std::wstring FormatBytesCompactWide(uint64_t bytes) {
+    wchar_t buf[64] = {0};
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+        std::swprintf(buf, 64, L"%.2f GB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+    } else if (bytes >= 1024ULL * 1024ULL) {
+        std::swprintf(buf, 64, L"%.0f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    } else if (bytes >= 1024ULL) {
+        std::swprintf(buf, 64, L"%.0f KB", static_cast<double>(bytes) / 1024.0);
+    } else {
+        std::swprintf(buf, 64, L"%llu B", static_cast<unsigned long long>(bytes));
+    }
+    return buf;
+}
+
+std::wstring FormatLiveMonitorHudBadge(const StreamHealthSnapshot& s) {
+    if (!s.active || s.waiting_first_frame) {
+        return L"";
+    }
+    const wchar_t* grade_lbl = L"🟢 極佳";
+    if (s.grade == StreamHealthGrade::StaticVfr) {
+        grade_lbl = L"🔵 靜態VFR";
+    } else if (s.grade == StreamHealthGrade::Warning) {
+        grade_lbl = L"🟡 負載偏高";
+    }
+    const wchar_t* dec_lbl = s.mock_source ? L"自測" : (s.hw_accelerated ? L"D3D11VA" : L"CPU軟解");
+    wchar_t buf[192] = {0};
+    std::swprintf(
+        buf,
+        192,
+        L"%ls ｜ %.1f FPS ｜ %.1f Mbps ｜ 延遲 %.1f ms (%ls) ｜ %u×%u",
+        grade_lbl,
+        s.fps,
+        s.bitrate_mbps,
+        s.pipeline_latency_ms,
+        dec_lbl,
+        s.frame_width,
+        s.frame_height);
+    return buf;
+}
+
+void DrawSparklineGdi(
+    HDC hdc,
+    const RECT& rc,
+    const std::vector<double>& history,
+    double max_scale,
+    COLORREF stroke_color) {
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w < 8 || h < 6) return;
+
+    HBRUSH box_bg = CreateSolidBrush(RGB(10, 19, 15));
+    HBRUSH box_bd = CreateSolidBrush(RGB(28, 58, 42));
+    FillRect(hdc, &rc, box_bg);
+    FrameRect(hdc, &rc, box_bd);
+    DeleteObject(box_bg);
+    DeleteObject(box_bd);
+
+    if (history.size() < 2 || max_scale <= 0.001) return;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, stroke_color);
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+
+    const size_t n = history.size();
+    const int inner_w = w - 4;
+    const int inner_h = h - 4;
+    for (size_t i = 0; i < n; ++i) {
+        double norm = std::clamp(history[i] / max_scale, 0.0, 1.0);
+        int px = rc.left + 2 + static_cast<int>((static_cast<double>(i) * inner_w) / static_cast<double>(n - 1));
+        int py = rc.bottom - 2 - static_cast<int>(norm * inner_h + 0.5);
+        if (i == 0) {
+            MoveToEx(hdc, px, py, nullptr);
+        } else {
+            LineTo(hdc, px, py);
+        }
+    }
+
+    SelectObject(hdc, old_pen);
+    DeleteObject(pen);
+}
+
+void DrawPreviewCanvasGdi(
+    HDC dst_hdc,
+    const RECT& target_rc,
+    bool has_frame,
+    const std::vector<uint8_t>& bgra_topdown,
+    uint32_t fit_w,
+    uint32_t fit_h,
+    bool draw_border,
+    const std::wstring& badge_text,
+    bool badge_is_toast,
+    const std::wstring& idle_title,
+    const std::wstring& idle_subtitle,
+    HFONT font_bold,
+    HFONT font_normal) {
+    int w = target_rc.right - target_rc.left;
+    int h = target_rc.bottom - target_rc.top;
+    if (w <= 4 || h <= 4) return;
+
+    HDC mem_dc = CreateCompatibleDC(dst_hdc);
+    HBITMAP mem_bmp = CreateCompatibleBitmap(dst_hdc, w, h);
+    HGDIOBJ old_bmp = SelectObject(mem_dc, mem_bmp);
+
+    RECT local_rc{0, 0, w, h};
+    HBRUSH bg_brush = CreateSolidBrush(has_frame ? RGB(0, 0, 0) : RGB(12, 20, 16));
+    FillRect(mem_dc, &local_rc, bg_brush);
+    DeleteObject(bg_brush);
+
+    if (has_frame && fit_w > 0 && fit_h > 0 &&
+        bgra_topdown.size() >= static_cast<size_t>(fit_w) * fit_h * 4ULL) {
+        int off_x = (w - static_cast<int>(fit_w)) / 2;
+        int off_y = (h - static_cast<int>(fit_h)) / 2;
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(fit_w);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(fit_h);  // Top-down BGRA32
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        StretchDIBits(
+            mem_dc,
+            off_x,
+            off_y,
+            static_cast<int>(fit_w),
+            static_cast<int>(fit_h),
+            0,
+            0,
+            static_cast<int>(fit_w),
+            static_cast<int>(fit_h),
+            bgra_topdown.data(),
+            &bmi,
+            DIB_RGB_COLORS,
+            SRCCOPY);
+    } else {
+        SetBkMode(mem_dc, TRANSPARENT);
+        HGDIOBJ old_font = SelectObject(mem_dc, font_bold);
+        SetTextColor(mem_dc, RGB(205, 214, 230));
+        RECT t1{12, h / 2 - 26, w - 12, h / 2};
+        DrawTextW(mem_dc, idle_title.c_str(), -1, &t1, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SelectObject(mem_dc, font_normal);
+        SetTextColor(mem_dc, RGB(128, 140, 162));
+        RECT t2{12, h / 2 + 2, w - 12, h / 2 + 26};
+        DrawTextW(mem_dc, idle_subtitle.c_str(), -1, &t2, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(mem_dc, old_font);
+    }
+
+    if (!badge_text.empty()) {
+        SetBkMode(mem_dc, TRANSPARENT);
+        HGDIOBJ old_f = SelectObject(mem_dc, font_normal);
+        RECT calc_rc{0, 0, w - 24, 32};
+        DrawTextW(mem_dc, badge_text.c_str(), -1, &calc_rc, DT_CALCRECT | DT_SINGLELINE);
+        int pill_w = std::min(w - 16, static_cast<int>(calc_rc.right - calc_rc.left) + 18);
+        int pill_h = static_cast<int>(calc_rc.bottom - calc_rc.top) + 8;
+        RECT pill_rc{8, 8, 8 + pill_w, 8 + pill_h};
+
+        HBRUSH pill_bg = CreateSolidBrush(badge_is_toast ? RGB(18, 68, 40) : RGB(20, 24, 32));
+        HBRUSH pill_bd = CreateSolidBrush(badge_is_toast ? RGB(54, 206, 118) : RGB(42, 198, 118));
+        FillRect(mem_dc, &pill_rc, pill_bg);
+        FrameRect(mem_dc, &pill_rc, pill_bd);
+        DeleteObject(pill_bg);
+        DeleteObject(pill_bd);
+
+        SetTextColor(mem_dc, badge_is_toast ? RGB(220, 255, 232) : RGB(236, 242, 252));
+        DrawTextW(mem_dc, badge_text.c_str(), -1, &pill_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(mem_dc, old_f);
+    }
+
+    if (draw_border) {
+        HBRUSH border_br = CreateSolidBrush(RGB(62, 72, 92));
+        FrameRect(mem_dc, &local_rc, border_br);
+        DeleteObject(border_br);
+    }
+
+    BitBlt(dst_hdc, target_rc.left, target_rc.top, w, h, mem_dc, 0, 0, SRCCOPY);
+    SelectObject(mem_dc, old_bmp);
+    DeleteObject(mem_bmp);
+    DeleteDC(mem_dc);
+}
+
+class LiveMonitorWindow {
+public:
+    LiveMonitorWindow(
+        HINSTANCE hinst,
+        HICON icon_big,
+        HICON icon_small,
+        HFONT font_bold,
+        HFONT font_normal,
+        std::function<void(HWND)> on_screenshot,
+        std::function<void()> on_open_folder)
+        : hinst_(hinst),
+          icon_big_(icon_big),
+          icon_small_(icon_small),
+          font_bold_(font_bold),
+          font_normal_(font_normal),
+          on_screenshot_(std::move(on_screenshot)),
+          on_open_folder_(std::move(on_open_folder)) {}
+
+    ~LiveMonitorWindow() {
+        CloseMonitor();
+        if (dark_bg_brush_) {
+            DeleteObject(dark_bg_brush_);
+            dark_bg_brush_ = nullptr;
+        }
+    }
+
+    HWND Hwnd() const { return hwnd_; }
+    bool IsOpen() const { return hwnd_ != nullptr && IsWindow(hwnd_); }
+
+    void ShowToast(const std::wstring& text, uint64_t duration_ms = 2200) {
+        toast_text_ = text;
+        toast_until_ms_ = GetTickCount64() + duration_ms;
+        if (IsOpen()) {
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+    }
+
+    void ShowOrActivate(UINT dpi) {
+        if (IsOpen()) {
+            if (IsIconic(hwnd_)) {
+                ShowWindow(hwnd_, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd_);
+            return;
+        }
+
+        const wchar_t* kCls = L"TJCapLiveMonitorWndClass";
+        if (!dark_bg_brush_) {
+            dark_bg_brush_ = CreateSolidBrush(RGB(10, 12, 16));
+        }
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+            wc.lpfnWndProc = &LiveMonitorWindow::StaticWndProc;
+            wc.hInstance = hinst_;
+            wc.hIcon = icon_big_ ? icon_big_ : LoadIconW(nullptr, IDI_APPLICATION);
+            wc.hIconSm = icon_small_ ? icon_small_ : wc.hIcon;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = dark_bg_brush_;
+            wc.lpszClassName = kCls;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        uint32_t adv_w = 1920, adv_h = 1080;
+        if (!shm_.IsOpen()) shm_.Open(kDefaultShmName);
+        shm_.QueryAdvertisedDimensions(adv_w, adv_h);
+
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        int max_w = (work.right - work.left) * 82 / 100;
+        int max_h = (work.bottom - work.top) * 82 / 100;
+
+        int client_w = MulDiv(1120, static_cast<int>(dpi), 96);
+        int client_h = MulDiv(630, static_cast<int>(dpi), 96);
+        if (adv_h > adv_w && adv_h > 0) {
+            client_h = std::min(max_h, MulDiv(860, static_cast<int>(dpi), 96));
+            client_w = std::max(320, static_cast<int>(static_cast<int64_t>(client_h) * adv_w / adv_h));
+        } else if (adv_w > 0 && adv_h > 0) {
+            client_w = std::min(max_w, MulDiv(1160, static_cast<int>(dpi), 96));
+            client_h = std::max(280, static_cast<int>(static_cast<int64_t>(client_w) * adv_h / adv_w));
+        }
+
+        RECT adj{0, 0, client_w, client_h};
+        DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+        AdjustWindowRectEx(&adj, style, FALSE, 0);
+        int win_w = std::min(max_w, static_cast<int>(adj.right - adj.left));
+        int win_h = std::min(max_h, static_cast<int>(adj.bottom - adj.top));
+        int pos_x = work.left + ((work.right - work.left) - win_w) / 2;
+        int pos_y = work.top + ((work.bottom - work.top) - win_h) / 2;
+
+        fullscreen_ = false;
+        topmost_ = false;
+        last_seq_ = 0;
+        force_refresh_ = true;
+
+        hwnd_ = CreateWindowExW(
+            0,
+            kCls,
+            L"TJCap Live Monitor — 獨立外接螢幕視窗 [雙擊 / F11: 全螢幕 ｜ F12: 原畫質截圖 ｜ 右鍵: 選單]",
+            style,
+            pos_x,
+            pos_y,
+            win_w,
+            win_h,
+            nullptr,
+            nullptr,
+            hinst_,
+            this);
+        if (!hwnd_) return;
+
+        if (icon_big_) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon_big_));
+        if (icon_small_) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon_small_));
+
+        SetTimer(hwnd_, kTimerId, 16, nullptr);
+        TickFrame(true);
+        ShowWindow(hwnd_, SW_SHOWNORMAL);
+        UpdateWindow(hwnd_);
+    }
+
+    void CloseMonitor() {
+        HWND w = hwnd_;
+        hwnd_ = nullptr;
+        if (w && IsWindow(w)) {
+            KillTimer(w, kTimerId);
+            DestroyWindow(w);
+        }
+        shm_.Close();
+        frame_bgra_.clear();
+        has_live_frame_ = false;
+    }
+
+private:
+    static constexpr UINT_PTR kTimerId = 1;
+    static constexpr int kCmdShot = 3001;
+    static constexpr int kCmdOpenDir = 3002;
+    static constexpr int kCmdFullscreen = 3003;
+    static constexpr int kCmdTopmost = 3004;
+    static constexpr int kCmdFitAspect = 3005;
+    static constexpr int kCmdClose = 3006;
+    static constexpr int kCmdToggleHud = 3007;
+
+    void UpdateTitleBar() {
+        if (!hwnd_ || fullscreen_) return;
+        std::wstring t = L"TJCap Live Monitor";
+        if (has_live_frame_ && src_w_ > 0 && src_h_ > 0) {
+            t += L" (" + std::to_wstring(src_w_) + L"×" + std::to_wstring(src_h_) + L")";
+        }
+        if (topmost_) t += L" [📌置頂]";
+        t += L" — F11: 全螢幕 ｜ Tab/F3: 健康度HUD ｜ F12: 原畫質截圖 ｜ 右鍵: 選單";
+        if (t != last_title_) {
+            last_title_ = t;
+            SetWindowTextW(hwnd_, t.c_str());
+        }
+    }
+
+    void ToggleFullscreen() {
+        if (!hwnd_) return;
+        if (!fullscreen_) {
+            wp_prev_.length = sizeof(wp_prev_);
+            GetWindowPlacement(hwnd_, &wp_prev_);
+            style_prev_ = static_cast<DWORD>(GetWindowLongPtrW(hwnd_, GWL_STYLE));
+
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi)) {
+                SetWindowLongPtrW(hwnd_, GWL_STYLE, style_prev_ & ~WS_OVERLAPPEDWINDOW);
+                SetWindowPos(
+                    hwnd_,
+                    topmost_ ? HWND_TOPMOST : HWND_TOP,
+                    mi.rcMonitor.left,
+                    mi.rcMonitor.top,
+                    mi.rcMonitor.right - mi.rcMonitor.left,
+                    mi.rcMonitor.bottom - mi.rcMonitor.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+                fullscreen_ = true;
+                force_refresh_ = true;
+                ShowToast(L"⛶ 已進入無邊框全螢幕（按 Esc 退出｜按 Tab 切換健康度 HUD）", 2000);
+            }
+        } else {
+            SetWindowLongPtrW(hwnd_, GWL_STYLE, style_prev_);
+            SetWindowPlacement(hwnd_, &wp_prev_);
+            SetWindowPos(
+                hwnd_,
+                topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            fullscreen_ = false;
+            force_refresh_ = true;
+            last_title_.clear();
+            UpdateTitleBar();
+        }
+    }
+
+    void ToggleTopmost() {
+        if (!hwnd_) return;
+        topmost_ = !topmost_;
+        SetWindowPos(
+            hwnd_,
+            topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        UpdateTitleBar();
+        ShowToast(topmost_ ? L"📌 已開啟視窗永遠置頂" : L"📌 已取消視窗置頂", 1600);
+    }
+
+    void ToggleHud() {
+        show_hud_ = !show_hud_;
+        if (show_hud_) {
+            shm_.ReadStreamHealth(hud_snap_);
+            hud_text_ = FormatLiveMonitorHudBadge(hud_snap_);
+            if (hud_text_.empty()) {
+                ShowToast(L"📊 已開啟串流健康度 HUD（待投影訊號開始即顯示 FPS / Mbps / ms）", 1800);
+            } else {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        } else {
+            hud_text_.clear();
+            ShowToast(L"📊 已隱藏串流健康度 HUD（按 Tab 或 F3 可重新顯示）", 1600);
+        }
+    }
+
+    void FitWindowToSourceAspect() {
+        if (!hwnd_ || src_w_ == 0 || src_h_ == 0) return;
+        if (fullscreen_) ToggleFullscreen();
+
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        int cur_cw = std::max(240, static_cast<int>(rc.right - rc.left));
+        int target_cw = cur_cw;
+        int target_ch = static_cast<int>((static_cast<int64_t>(target_cw) * src_h_ + src_w_ / 2) / src_w_);
+
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi)) {
+            int max_h = (mi.rcWork.bottom - mi.rcWork.top) * 86 / 100;
+            if (target_ch > max_h) {
+                target_ch = max_h;
+                target_cw = static_cast<int>((static_cast<int64_t>(target_ch) * src_w_ + src_h_ / 2) / src_h_);
+            }
+        }
+
+        DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd_, GWL_STYLE));
+        DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE));
+        RECT adj{0, 0, target_cw, target_ch};
+        AdjustWindowRectEx(&adj, style, FALSE, ex_style);
+        SetWindowPos(
+            hwnd_,
+            nullptr,
+            0,
+            0,
+            adj.right - adj.left,
+            adj.bottom - adj.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        force_refresh_ = true;
+    }
+
+    void ShowContextMenu(int screen_x, int screen_y) {
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        AppendMenuW(menu, MF_STRING, kCmdShot, L"📸 一鍵原畫質無損截圖 (PNG + 複製剪貼簿)\tF12 / Ctrl+S");
+        AppendMenuW(menu, MF_STRING, kCmdOpenDir, L"📂 開啟截圖儲存資料夾");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(
+            menu,
+            MF_STRING | (show_hud_ ? MF_CHECKED : 0),
+            kCmdToggleHud,
+            L"📊 顯示即時串流健康度 HUD (FPS / Mbps / 延遲 ms)\tTab / F3");
+        AppendMenuW(menu, MF_STRING | (fullscreen_ ? MF_CHECKED : 0), kCmdFullscreen, L"⛶ 無邊框全螢幕模式\tF11 / 雙擊");
+        AppendMenuW(menu, MF_STRING | (topmost_ ? MF_CHECKED : 0), kCmdTopmost, L"📌 視窗永遠置頂 (Always on Top)\tCtrl+T");
+        AppendMenuW(
+            menu,
+            MF_STRING | ((has_live_frame_ && src_w_ > 0) ? 0 : MF_GRAYED),
+            kCmdFitAspect,
+            L"📐 依手機原生比例自動貼合視窗大小");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kCmdClose, L"關閉獨立預覽視窗");
+
+        if (screen_x == -1 && screen_y == -1) {
+            POINT pt{40, 40};
+            ClientToScreen(hwnd_, &pt);
+            screen_x = pt.x;
+            screen_y = pt.y;
+        }
+        TrackPopupMenu(menu, TPM_RIGHTBUTTON, screen_x, screen_y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+    }
+
+    void TickFrame(bool force) {
+        if (!hwnd_ || IsIconic(hwnd_)) return;
+
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        uint32_t cw = static_cast<uint32_t>(std::max<LONG>(2, rc.right - rc.left));
+        uint32_t ch = static_cast<uint32_t>(std::max<LONG>(2, rc.bottom - rc.top));
+
+        if (!shm_.IsOpen()) {
+            shm_.Open(kDefaultShmName);
+        }
+
+        bool updated = false;
+        uint32_t fit_w = 0, fit_h = 0, sw = 0, sh = 0;
+        bool alive = shm_.ReadLatestPreviewBGRA32(
+            cw,
+            ch,
+            force || force_refresh_,
+            last_seq_,
+            frame_bgra_,
+            fit_w,
+            fit_h,
+            sw,
+            sh,
+            &updated);
+        force_refresh_ = false;
+
+        uint64_t now_tick = GetTickCount64();
+        bool toast_expired = (!toast_text_.empty() && now_tick >= toast_until_ms_);
+        if (toast_expired) {
+            toast_text_.clear();
+        }
+
+        bool hud_changed = false;
+        if (show_hud_ && (force || now_tick >= next_hud_sample_ms_)) {
+            next_hud_sample_ms_ = now_tick + 450ULL;
+            shm_.ReadStreamHealth(hud_snap_);
+            std::wstring next_hud = FormatLiveMonitorHudBadge(hud_snap_);
+            if (next_hud != hud_text_) {
+                hud_text_ = std::move(next_hud);
+                hud_changed = true;
+            }
+        }
+
+        if (alive) {
+            bool dim_changed = (!has_live_frame_ || sw != src_w_ || sh != src_h_);
+            has_live_frame_ = true;
+            fit_w_ = fit_w;
+            fit_h_ = fit_h;
+            src_w_ = sw;
+            src_h_ = sh;
+            if (dim_changed) {
+                UpdateTitleBar();
+            }
+            if (updated || dim_changed || toast_expired || hud_changed) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        } else if (has_live_frame_ || toast_expired || hud_changed) {
+            has_live_frame_ = false;
+            last_seq_ = 0;
+            hud_text_.clear();
+            UpdateTitleBar();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+    }
+
+    static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        LiveMonitorWindow* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = static_cast<LiveMonitorWindow*>(cs->lpCreateParams);
+            self->hwnd_ = hwnd;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<LiveMonitorWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        }
+        return self ? self->WndProc(msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+        switch (msg) {
+            case WM_ERASEBKGND:
+                return 1;
+
+            case WM_SIZE:
+                force_refresh_ = true;
+                TickFrame(true);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+
+            case WM_TIMER:
+                if (wParam == kTimerId) {
+                    TickFrame(false);
+                }
+                return 0;
+
+            case WM_PAINT: {
+                PAINTSTRUCT ps{};
+                HDC hdc = BeginPaint(hwnd_, &ps);
+                RECT rc{};
+                GetClientRect(hwnd_, &rc);
+                std::wstring badge;
+                bool is_toast = false;
+                if (!toast_text_.empty() && GetTickCount64() < toast_until_ms_) {
+                    badge = toast_text_;
+                    is_toast = true;
+                } else if (show_hud_ && has_live_frame_ && !hud_text_.empty()) {
+                    badge = hud_text_;
+                }
+                DrawPreviewCanvasGdi(
+                    hdc,
+                    rc,
+                    has_live_frame_,
+                    frame_bgra_,
+                    fit_w_,
+                    fit_h_,
+                    false,
+                    badge,
+                    is_toast,
+                    L"📺 等待 Android 手機 / 平板 投影訊號中...",
+                    L"於主控制台點擊「🚀 智慧一鍵啟動」後即顯示高畫質畫面（F11 全螢幕｜Tab 健康度 HUD｜F12 原畫質截圖）",
+                    font_bold_,
+                    font_normal_);
+                EndPaint(hwnd_, &ps);
+                return 0;
+            }
+
+            case WM_LBUTTONDBLCLK:
+                ToggleFullscreen();
+                return 0;
+
+            case WM_CONTEXTMENU:
+                ShowContextMenu(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                return 0;
+
+            case WM_SYSKEYDOWN:
+                if (wParam == VK_RETURN) {
+                    ToggleFullscreen();
+                    return 0;
+                }
+                break;
+
+            case WM_KEYDOWN: {
+                bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                if (wParam == VK_F11) {
+                    ToggleFullscreen();
+                    return 0;
+                }
+                if (wParam == VK_ESCAPE && fullscreen_) {
+                    ToggleFullscreen();
+                    return 0;
+                }
+                if (wParam == VK_TAB || wParam == VK_F3) {
+                    ToggleHud();
+                    return 0;
+                }
+                if (wParam == VK_F12 || (ctrl && wParam == 'S')) {
+                    if (on_screenshot_) on_screenshot_(hwnd_);
+                    return 0;
+                }
+                if (ctrl && wParam == 'T') {
+                    ToggleTopmost();
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_COMMAND: {
+                int id = LOWORD(wParam);
+                if (id == kCmdShot) {
+                    if (on_screenshot_) on_screenshot_(hwnd_);
+                    return 0;
+                }
+                if (id == kCmdOpenDir) {
+                    if (on_open_folder_) on_open_folder_();
+                    return 0;
+                }
+                if (id == kCmdToggleHud) {
+                    ToggleHud();
+                    return 0;
+                }
+                if (id == kCmdFullscreen) {
+                    ToggleFullscreen();
+                    return 0;
+                }
+                if (id == kCmdTopmost) {
+                    ToggleTopmost();
+                    return 0;
+                }
+                if (id == kCmdFitAspect) {
+                    FitWindowToSourceAspect();
+                    return 0;
+                }
+                if (id == kCmdClose) {
+                    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_CLOSE:
+                CloseMonitor();
+                return 0;
+        }
+        return DefWindowProcW(hwnd_, msg, wParam, lParam);
+    }
+
+    HINSTANCE hinst_ = nullptr;
+    HWND hwnd_ = nullptr;
+    HICON icon_big_ = nullptr;
+    HICON icon_small_ = nullptr;
+    HFONT font_bold_ = nullptr;
+    HFONT font_normal_ = nullptr;
+    HBRUSH dark_bg_brush_ = nullptr;
+
+    std::function<void(HWND)> on_screenshot_;
+    std::function<void()> on_open_folder_;
+
+    SharedCaptureConsumer shm_;
+    uint64_t last_seq_ = 0;
+    bool force_refresh_ = true;
+    bool has_live_frame_ = false;
+    uint32_t fit_w_ = 0;
+    uint32_t fit_h_ = 0;
+    uint32_t src_w_ = 0;
+    uint32_t src_h_ = 0;
+    std::vector<uint8_t> frame_bgra_;
+
+    bool fullscreen_ = false;
+    bool topmost_ = false;
+    bool show_hud_ = true;
+    uint64_t next_hud_sample_ms_ = 0;
+    StreamHealthSnapshot hud_snap_{};
+    std::wstring hud_text_;
+    DWORD style_prev_ = 0;
+    WINDOWPLACEMENT wp_prev_{};
+    std::wstring last_title_;
+
+    std::wstring toast_text_;
+    uint64_t toast_until_ms_ = 0;
+};
+
+class ControlCenterWindow {
+public:
+    HWND Hwnd() const { return hwnd_; }
+    HWND LiveMonitorHwnd() const { return live_monitor_ ? live_monitor_->Hwnd() : nullptr; }
+    void TriggerScreenshotFromHotkey() { TakeFullResolutionScreenshot(hwnd_); }
+
+    bool Create(HINSTANCE hInst, int nCmdShow) {
+        hinst_ = hInst;
+        base_dir_ = AppDir();
+        UnblockDownloadedFiles(base_dir_);
+        CleanupOldPortableUpdateFiles(base_dir_);
+
+        UINT dpi = GetSystemDpiSafe(nullptr);
+        icon_big_ = static_cast<HICON>(LoadImageW(
+            hInst, MAKEINTRESOURCEW(IDI_APP_MAIN_ICON), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+        icon_small_ = static_cast<HICON>(LoadImageW(
+            hInst, MAKEINTRESOURCEW(IDI_APP_MAIN_ICON), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+        icon_banner_ = static_cast<HICON>(LoadImageW(
+            hInst, MAKEINTRESOURCEW(IDI_APP_MAIN_ICON), IMAGE_ICON,
+            Scale(64, dpi), Scale(64, dpi), LR_DEFAULTCOLOR));
+
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+        wc.lpfnWndProc = &ControlCenterWindow::StaticWndProc;
+        wc.hInstance = hInst;
+        wc.hIcon = icon_big_ ? icon_big_ : LoadIconW(nullptr, IDI_APPLICATION);
+        wc.hIconSm = icon_small_ ? icon_small_ : wc.hIcon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"TJCapForAndroidGuiWndClass";
+        RegisterClassExW(&wc);
+
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        int work_w = std::max<int>(640, work.right - work.left);
+        int work_h = std::max<int>(560, work.bottom - work.top);
+        int win_w = std::min<int>(Scale(820, dpi), work_w);
+        int win_h = std::min<int>(Scale(788, dpi), work_h);
+        int pos_x = work.left + (work_w - win_w) / 2;
+        int pos_y = std::max<int>(work.top, work.top + (work_h - win_h) / 2);
+
+        hwnd_ = CreateWindowExW(
+            0,
+            wc.lpszClassName,
+            L"TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR L" — 智慧擷取控制台 (故障偵測報錯 × 健康度儀表板 × 即時預覽)",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
+            pos_x, pos_y, win_w, win_h,
+            nullptr, nullptr, hInst, this);
+        if (!hwnd_) return false;
+
+        if (icon_big_) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon_big_));
+        if (icon_small_) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon_small_));
+
+        ShowWindow(hwnd_, nCmdShow);
+        UpdateWindow(hwnd_);
+        return true;
+    }
+
+private:
+    static UINT GetSystemDpiSafe(HWND hwnd) {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        using GetDpiForSystemFn = UINT(WINAPI*)();
+        HMODULE u32 = GetModuleHandleW(L"user32.dll");
+        if (u32) {
+            if (hwnd) {
+                auto fn = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(u32, "GetDpiForWindow"));
+                if (fn) {
+                    UINT d = fn(hwnd);
+                    if (d > 0) return d;
+                }
+            }
+            auto sys_fn = reinterpret_cast<GetDpiForSystemFn>(GetProcAddress(u32, "GetDpiForSystem"));
+            if (sys_fn) {
+                UINT d = sys_fn();
+                if (d > 0) return d;
+            }
+        }
+        HDC hdc = GetDC(nullptr);
+        UINT d = hdc ? static_cast<UINT>(GetDeviceCaps(hdc, LOGPIXELSX)) : 96U;
+        if (hdc) ReleaseDC(nullptr, hdc);
+        return d > 0 ? d : 96U;
+    }
+
+    static int Scale(int px, UINT dpi) {
+        return MulDiv(px, static_cast<int>(dpi), 96);
+    }
+
+    void CreateFonts(UINT dpi) {
+        if (font_normal_) DeleteObject(font_normal_);
+        if (font_bold_) DeleteObject(font_bold_);
+        if (font_title_) DeleteObject(font_title_);
+        if (font_mono_) DeleteObject(font_mono_);
+        if (font_metric_) DeleteObject(font_metric_);
+        if (font_small_) DeleteObject(font_small_);
+
+        auto make_font = [&](int pt_tenths, int weight, const wchar_t* face) {
+            int height = -MulDiv(pt_tenths, static_cast<int>(dpi), 720);
+            return CreateFontW(
+                height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+        };
+
+        font_normal_ = make_font(98, FW_NORMAL, L"Microsoft JhengHei UI");
+        font_bold_ = make_font(105, FW_SEMIBOLD, L"Microsoft JhengHei UI");
+        font_title_ = make_font(125, FW_BOLD, L"Microsoft JhengHei UI");
+        font_mono_ = make_font(92, FW_NORMAL, L"Consolas");
+        font_metric_ = make_font(132, FW_BOLD, L"Microsoft JhengHei UI");
+        font_small_ = make_font(85, FW_NORMAL, L"Microsoft JhengHei UI");
+    }
+
+    void BuildControls() {
+        UINT dpi = GetSystemDpiSafe(hwnd_);
+        CreateFonts(dpi);
+
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        int cw = rc.right - rc.left;
+        int margin = Scale(18, dpi);
+        int content_w = cw - margin * 2;
+
+        // Top banner: y = 10 .. 130
+        banner_rect_ = {margin, Scale(10, dpi), cw - margin, Scale(130, dpi)};
+
+        // Group 1: Preferences (y = 138 .. 322)
+        int grp1_y = Scale(138, dpi);
+        int grp1_h = Scale(184, dpi);
+        HWND grp_pref = CreateWindowExW(
+            0, L"BUTTON", L"雙模連線方式（免裝 App 直連 ／ 免開 USB 偵錯 Companion APK）、畫質上限與音訊設定",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            margin, grp1_y, content_w, grp1_h, hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(grp_pref, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+
+        int lbl_w = Scale(158, dpi);
+        int combo_w = content_w - lbl_w - Scale(28, dpi);
+
+        // Row 0: Connection Transport Mode + Companion APK Folder button
+        int row_conn_y = grp1_y + Scale(25, dpi);
+        HWND lbl_conn = CreateWindowExW(
+            0, L"STATIC", L"USB-C 擷取連線模式：",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            margin + Scale(14, dpi), row_conn_y, lbl_w, Scale(26, dpi), hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_conn, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        int apk_btn_w = Scale(112, dpi);
+        int conn_combo_w = combo_w - apk_btn_w - Scale(6, dpi);
+        combo_conn_mode_ = CreateWindowExW(
+            0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+            margin + Scale(14, dpi) + lbl_w, row_conn_y, conn_combo_w, Scale(220, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdComboConnMode)), hinst_, nullptr);
+        SendMessageW(combo_conn_mode_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        SendMessageW(combo_conn_mode_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"⚡ 免裝手機 App 直連（推薦：透過「USB 偵錯」，免裝 APK、全系統內錄）"));
+        SendMessageW(combo_conn_mode_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"🛡️ 免開 USB 偵錯備援（手機安裝 TJCap Companion APK + USB AOA 配件直連）"));
+        SendMessageW(combo_conn_mode_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"🔄 智慧雙模自動切換（優先 ADB 直連，未開 USB 偵錯時自動切換 AOA）"));
+        SendMessageW(combo_conn_mode_, CB_SETCURSEL, 0, 0);
+
+        btn_open_apk_ = CreateWindowExW(
+            0, L"BUTTON", L"📲 取得 APK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            margin + Scale(14, dpi) + lbl_w + conn_combo_w + Scale(6, dpi), row_conn_y - Scale(1, dpi),
+            apk_btn_w, Scale(27, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnOpenApk)), hinst_, nullptr);
+        SendMessageW(btn_open_apk_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        // Row 1: Max Selectable Resolution & Adaptive Aspect Ratio
+        int row0_y = grp1_y + Scale(57, dpi);
+        HWND lbl_res = CreateWindowExW(
+            0, L"STATIC", L"最大解析度與比例選項：",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            margin + Scale(14, dpi), row0_y, lbl_w, Scale(26, dpi), hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_res, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        combo_res_mode_ = CreateWindowExW(
+            0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+            margin + Scale(14, dpi) + lbl_w, row0_y, combo_w, Scale(240, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdComboResMode)), hinst_, nullptr);
+        SendMessageW(combo_res_mode_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        PopulateResolutionOptionsForSpeed(UsbLinkSpeed::Unknown, true);
+
+        // Row 2: Target FPS & Orientation Lock policy
+        int row1_y = grp1_y + Scale(89, dpi);
+        HWND lbl_bar = CreateWindowExW(
+            0, L"STATIC", L"目標幀率與畫面方向：",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            margin + Scale(14, dpi), row1_y, lbl_w, Scale(26, dpi), hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_bar, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        combo_status_bar_ = CreateWindowExW(
+            0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+            margin + Scale(14, dpi) + lbl_w, row1_y, combo_w, Scale(200, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdComboStatusBar)), hinst_, nullptr);
+        SendMessageW(combo_status_bar_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        SendMessageW(combo_status_bar_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"🔒 60 FPS 穩定直播模式（推薦：鎖定初始橫直向，OBS 畫布零閃爍）"));
+        SendMessageW(combo_status_bar_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"⚡ 120 FPS 電競高刷模式（鎖定初始橫直向，適合高刷手遊與獨立預覽）"));
+        SendMessageW(combo_status_bar_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"🔄 60 FPS 自動跟隨旋轉（手機旋轉時即時切換直向／橫向比例）"));
+        SendMessageW(combo_status_bar_, CB_SETCURSEL, 0, 0);
+
+        // Row 3: PC Audio Routing / Monitoring
+        int row2_y = grp1_y + Scale(121, dpi);
+        HWND lbl_aud = CreateWindowExW(
+            0, L"STATIC", L"電腦端音訊監聽／轉發：",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            margin + Scale(14, dpi), row2_y, lbl_w, Scale(26, dpi), hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_aud, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        combo_audio_ = CreateWindowExW(
+            0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+            margin + Scale(14, dpi) + lbl_w, row2_y, combo_w, Scale(240, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdComboAudioOut)), hinst_, nullptr);
+        SendMessageW(combo_audio_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        PopulateAudioEndpoints();
+
+        // Row 4: GPU Hardware Decode
+        int row3_y = grp1_y + Scale(153, dpi);
+        chk_hw_decode_ = CreateWindowExW(
+            0, L"BUTTON", L"啟用 GPU 硬體超低延遲解碼 (D3D11VA，2K+60/120fps 建議保持開啟)",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            margin + Scale(14, dpi), row3_y, content_w - Scale(28, dpi), Scale(22, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkHwDecode)), hinst_, nullptr);
+        SendMessageW(chk_hw_decode_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        SendMessageW(chk_hw_decode_, BM_SETCHECK, BST_CHECKED, 0);
+
+        // Group 2: One-Click Action Buttons (y = 330 .. 444)
+        int grp2_y = Scale(330, dpi);
+        int grp2_h = Scale(114, dpi);
+        HWND grp_act = CreateWindowExW(
+            0, L"BUTTON", L"一鍵自動化操作",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            margin, grp2_y, content_w, grp2_h, hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(grp_act, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+
+        int btn_pad = Scale(14, dpi);
+        int inner_w = content_w - btn_pad * 2;
+        int main_btn_y = grp2_y + Scale(24, dpi);
+        btn_smart_start_ = CreateWindowExW(
+            0, L"BUTTON", L"🚀 智慧一鍵啟動（自動檢查安裝驅動 ➔ 開始 2K+ 原生投影）",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            margin + btn_pad, main_btn_y, inner_w, Scale(40, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnSmartStart)), hinst_, nullptr);
+        SendMessageW(btn_smart_start_, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+
+        int sub_btn_y = main_btn_y + Scale(46, dpi);
+        int gap = Scale(7, dpi);
+        int avail_btn_w = inner_w - gap * 5;
+        int w_mock = avail_btn_w * 18 / 100;
+        int w_rep = avail_btn_w * 19 / 100;
+        int w_diag = avail_btn_w * 19 / 100;
+        int w_obs = avail_btn_w * 14 / 100;
+        int w_upd = avail_btn_w * 17 / 100;
+        int w_uninst = avail_btn_w - w_mock - w_rep - w_diag - w_obs - w_upd;
+
+        int cur_x = margin + btn_pad;
+        btn_mock_ = CreateWindowExW(
+            0, L"BUTTON", L"🧪 免手機自測",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cur_x, sub_btn_y, w_mock, Scale(34, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnMockTest)), hinst_, nullptr);
+        SendMessageW(btn_mock_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        cur_x += w_mock + gap;
+
+        btn_repair_ = CreateWindowExW(
+            0, L"BUTTON", L"🔧 安裝／修復驅動",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cur_x, sub_btn_y, w_rep, Scale(34, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnRepairDriver)), hinst_, nullptr);
+        SendMessageW(btn_repair_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        cur_x += w_rep + gap;
+
+        btn_diagnostics_ = CreateWindowExW(
+            0, L"BUTTON", L"🩺 診斷報錯",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cur_x, sub_btn_y, w_diag, Scale(34, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnDiagnostics)), hinst_, nullptr);
+        SendMessageW(btn_diagnostics_, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+        cur_x += w_diag + gap;
+
+        btn_obs_guide_ = CreateWindowExW(
+            0, L"BUTTON", L"📋 連線教學",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cur_x, sub_btn_y, w_obs, Scale(34, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnCopyObsGuide)), hinst_, nullptr);
+        SendMessageW(btn_obs_guide_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        cur_x += w_obs + gap;
+
+        btn_update_ = CreateWindowExW(
+            0, L"BUTTON", L"🔄 檢查更新",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cur_x, sub_btn_y, w_upd, Scale(34, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnCheckUpdate)), hinst_, nullptr);
+        SendMessageW(btn_update_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        cur_x += w_upd + gap;
+
+        btn_uninstall_ = CreateWindowExW(
+            0, L"BUTTON", L"🗑 完整移除",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cur_x, sub_btn_y, w_uninst, Scale(34, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnUninstall)), hinst_, nullptr);
+        SendMessageW(btn_uninstall_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        // Group 3: Live Stream Health Telemetry Dashboard (FPS / Bitrate Mbps / Decode Latency ms / Health Grade)
+        telemetry_rect_ = {margin, Scale(452, dpi), cw - margin, Scale(524, dpi)};
+
+        // Group 4: Split Lower Section — Left: Live Diagnostics Log | Right: Low-Load Live Preview & 1:1 Lossless Screenshot
+        int split_gap = Scale(14, dpi);
+        int left_w = (content_w - split_gap) * 53 / 100;
+        int right_x = margin + left_w + split_gap;
+        int right_w = (cw - margin) - right_x;
+
+        int log_lbl_y = Scale(532, dpi);
+        HWND lbl_log = CreateWindowExW(
+            0, L"STATIC",
+            L"即時狀態、解析度比例與碼率監控日誌：",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            margin, log_lbl_y, left_w, Scale(22, dpi), hwnd_, nullptr, hinst_, nullptr);
+        SendMessageW(lbl_log, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        int edit_y = log_lbl_y + Scale(24, dpi);
+        int bottom_margin = Scale(12, dpi);
+        int edit_h = (rc.bottom - rc.top) - edit_y - bottom_margin;
+        edit_log_ = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            margin, edit_y, left_w, std::max(72, edit_h),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdEditLog)), hinst_, nullptr);
+        SendMessageW(edit_log_, WM_SETFONT, reinterpret_cast<WPARAM>(font_mono_), TRUE);
+        SendMessageW(edit_log_, EM_SETLIMITTEXT, 256 * 1024, 0);
+
+        chk_inline_preview_ = CreateWindowExW(
+            0, L"BUTTON", L"👁 內建即時預覽（雙擊放大｜F12 原畫質截圖）",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            right_x, log_lbl_y, right_w, Scale(22, dpi),
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdChkInlinePreview)), hinst_, nullptr);
+        SendMessageW(chk_inline_preview_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        SendMessageW(chk_inline_preview_, BM_SETCHECK, BST_CHECKED, 0);
+        inline_preview_enabled_ = true;
+
+        int preview_btn_h = Scale(30, dpi);
+        int preview_btn_y = (rc.bottom - rc.top) - bottom_margin - preview_btn_h;
+        preview_rect_ = {
+            right_x,
+            edit_y,
+            cw - margin,
+            std::max(edit_y + Scale(54, dpi), preview_btn_y - Scale(6, dpi)),
+        };
+
+        int p_gap = Scale(6, dpi);
+        int p_avail = right_w - p_gap * 2;
+        int w_pop = p_avail * 38 / 100;
+        int w_shot = p_avail * 40 / 100;
+        int w_dir = p_avail - w_pop - w_shot;
+        int px = right_x;
+
+        btn_popout_monitor_ = CreateWindowExW(
+            0, L"BUTTON", L"🖥 獨立大視窗",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            px, preview_btn_y, w_pop, preview_btn_h,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnPopoutMonitor)), hinst_, nullptr);
+        SendMessageW(btn_popout_monitor_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+        px += w_pop + p_gap;
+
+        btn_screenshot_ = CreateWindowExW(
+            0, L"BUTTON", L"📸 原畫質截圖",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            px, preview_btn_y, w_shot, preview_btn_h,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnScreenshot)), hinst_, nullptr);
+        SendMessageW(btn_screenshot_, WM_SETFONT, reinterpret_cast<WPARAM>(font_bold_), TRUE);
+        px += w_shot + p_gap;
+
+        btn_open_shots_ = CreateWindowExW(
+            0, L"BUTTON", L"📂 圖庫",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            px, preview_btn_y, w_dir, preview_btn_h,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnOpenScreenshots)), hinst_, nullptr);
+        SendMessageW(btn_open_shots_, WM_SETFONT, reinterpret_cast<WPARAM>(font_normal_), TRUE);
+
+        live_monitor_ = std::make_unique<LiveMonitorWindow>(
+            hinst_,
+            icon_big_,
+            icon_small_,
+            font_bold_,
+            font_normal_,
+            [this](HWND owner) { TakeFullResolutionScreenshot(owner); },
+            [this]() { OpenScreenshotsFolder(); });
+
+        AppendLogLine(
+            L"[歡迎] 歡迎使用 TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR
+            L"！新增「🩺 智慧故障偵測與一鍵診斷報錯中心（含自動軟解自癒、隱私脫敏與 GitHub 回報）」！");
+        RefreshHealthAndUi(true);
+        TickTelemetryDashboard(true);
+        SetTimer(hwnd_, kTimerRefreshId, 2000, nullptr);
+        SetTimer(hwnd_, kTimerStartupUpdateId, 1500, nullptr);
+        SetTimer(hwnd_, kTimerPreviewId, 33, nullptr);
+        SetTimer(hwnd_, kTimerTelemetryId, 500, nullptr);
+    }
+
+    void PopulateResolutionOptionsForSpeed(UsbLinkSpeed speed, bool is_initial) {
+        if (!combo_res_mode_) return;
+
+        uint32_t prev_max_dim = 0;
+        std::wstring prev_mode_tag;
+        LRESULT cur_sel = SendMessageW(combo_res_mode_, CB_GETCURSEL, 0, 0);
+        if (!is_initial && cur_sel >= 0 && static_cast<size_t>(cur_sel) < res_options_.size()) {
+            prev_max_dim = res_options_[static_cast<size_t>(cur_sel)].max_dim;
+            prev_mode_tag = res_options_[static_cast<size_t>(cur_sel)].mode_tag;
+        }
+
+        const uint32_t max_cap = MaxSelectableDimForUsbSpeed(speed);
+        std::vector<ResOptionSpec> next_opts;
+
+        if (max_cap >= 3840U) {
+            // USB 3.x (5 / 10 / 20 Gbps): unlock full 3840p native tier + all lower tiers
+            next_opts.push_back({
+                3840U,
+                L"native",
+                L"🌟 原生極限無上限（最高 3840p 自適應比例 — USB 3.x 高速接口已解鎖）",
+                L" --res native --max-dim 3840",
+            });
+            next_opts.push_back({
+                2560U,
+                L"native",
+                L"💎 2K 高畫質上限（最高 2560p 自適應比例）",
+                L" --res native --max-dim 2560",
+            });
+            next_opts.push_back({
+                1920U,
+                L"native",
+                L"✨ 1080p 標準上限（最高 1920p 自適應比例、低負載）",
+                L" --res native --max-dim 1920",
+            });
+            next_opts.push_back({
+                1280U,
+                L"native",
+                L"⚡ 720p 流暢上限（最高 1280p 自適應比例）",
+                L" --res native --max-dim 1280",
+            });
+            next_opts.push_back({
+                2560U,
+                L"1440p",
+                L"🖥 固定 2K 16:9 畫布 (2560×1440，直橫屏旋轉自動補黑邊)",
+                L" --res 1440p --max-dim 2560",
+            });
+            next_opts.push_back({
+                1920U,
+                L"1080p",
+                L"🖥 固定 1080p 16:9 畫布 (1920×1080，傳統直播相容模式)",
+                L" --res 1080p --max-dim 1920",
+            });
+        } else if (max_cap >= 2560U) {
+            // USB 2.0 (480 Mbps) or Unplugged: cap selectable max at 2K (2560p); 3840p option is gated out
+            if (speed == UsbLinkSpeed::High_480Mbps) {
+                next_opts.push_back({
+                    2560U,
+                    L"native",
+                    L"💎 2K 高畫質上限（最高 2560p 自適應比例 — USB 2.0 接口最高上限）",
+                    L" --res native --max-dim 2560",
+                });
+                next_opts.push_back({
+                    1920U,
+                    L"native",
+                    L"✨ 1080p 標準上限（最高 1920p 自適應比例 — USB 2.0 穩定推薦）",
+                    L" --res native --max-dim 1920",
+                });
+            } else {
+                next_opts.push_back({
+                    2560U,
+                    L"native",
+                    L"💎 2K 高畫質上限（最高 2560p 自適應 — 插入 USB 3.x 接口將解鎖 3840p）",
+                    L" --res native --max-dim 2560",
+                });
+                next_opts.push_back({
+                    1920U,
+                    L"native",
+                    L"✨ 1080p 標準上限（最高 1920p 自適應比例、低負載）",
+                    L" --res native --max-dim 1920",
+                });
+            }
+            next_opts.push_back({
+                1280U,
+                L"native",
+                L"⚡ 720p 流暢上限（最高 1280p 自適應比例）",
+                L" --res native --max-dim 1280",
+            });
+            next_opts.push_back({
+                2560U,
+                L"1440p",
+                L"🖥 固定 2K 16:9 畫布 (2560×1440，直橫屏旋轉自動補黑邊)",
+                L" --res 1440p --max-dim 2560",
+            });
+            next_opts.push_back({
+                1920U,
+                L"1080p",
+                L"🖥 固定 1080p 16:9 畫布 (1920×1080，傳統直播相容模式)",
+                L" --res 1080p --max-dim 1920",
+            });
+        } else {
+            // USB 1.1 (1.5 / 12 Mbps): cap selectable max at 720p (1280p)
+            next_opts.push_back({
+                1280U,
+                L"native",
+                L"⚡ 720p 流暢上限（最高 1280p 自適應比例 — USB 1.1 接口最高上限）",
+                L" --res native --max-dim 1280",
+            });
+            next_opts.push_back({
+                960U,
+                L"native",
+                L"📱 540p 省頻寬上限（最高 960p 自適應比例）",
+                L" --res native --max-dim 960",
+            });
+            next_opts.push_back({
+                1280U,
+                L"720p",
+                L"🖥 固定 720p 16:9 畫布 (1280×720)",
+                L" --res 720p --max-dim 1280",
+            });
+        }
+
+        res_options_ = std::move(next_opts);
+        SendMessageW(combo_res_mode_, CB_RESETCONTENT, 0, 0);
+        for (const auto& opt : res_options_) {
+            SendMessageW(combo_res_mode_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(opt.label.c_str()));
+        }
+
+        int target_idx = 0;
+        if (!is_initial && user_manually_picked_res_ && prev_max_dim > 0) {
+            for (size_t i = 0; i < res_options_.size(); ++i) {
+                if (res_options_[i].max_dim == prev_max_dim && res_options_[i].mode_tag == prev_mode_tag) {
+                    target_idx = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        SendMessageW(combo_res_mode_, CB_SETCURSEL, target_idx, 0);
+    }
+
+    void PopulateAudioEndpoints() {
+        SendMessageW(combo_audio_, CB_RESETCONTENT, 0, 0);
+        audio_endpoint_matches_.clear();
+
+        SendMessageW(combo_audio_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"自動偵測 VB-Audio Virtual Cable（預設，供 Discord/Zoom 收音）"));
+        audio_endpoint_matches_.push_back(L"__AUTO__");
+
+        SendMessageW(combo_audio_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"僅輸出至 OBS「TJCap for Android (Audio)」（不在電腦喇叭播放）"));
+        audio_endpoint_matches_.push_back(L"__NONE__");
+
+        auto eps = WasapiAudioRouter::EnumerateRenderEndpoints();
+        for (const auto& ep : eps) {
+            std::wstring wname = Utf8ToWide(ep.friendly_name_utf8);
+            std::wstring label = L"🎧 同步播放／轉發至：" + wname;
+            SendMessageW(combo_audio_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            audio_endpoint_matches_.push_back(wname);
+        }
+        SendMessageW(combo_audio_, CB_SETCURSEL, 0, 0);
+    }
+
+    void AppendLogLine(const std::wstring& line) {
+        if (!edit_log_) return;
+        std::wstring formatted = line;
+        if (formatted.empty() || formatted.back() != L'\n') {
+            formatted += L"\r\n";
+        } else if (formatted.size() >= 2 && formatted[formatted.size() - 2] != L'\r') {
+            formatted.pop_back();
+            formatted += L"\r\n";
+        }
+
+        int len = GetWindowTextLengthW(edit_log_);
+        if (len > 180000) {
+            SetWindowTextW(edit_log_, L"");
+            len = 0;
+        }
+        SendMessageW(edit_log_, EM_SETSEL, len, len);
+        SendMessageW(edit_log_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(formatted.c_str()));
+        SendMessageW(edit_log_, EM_SCROLLCARET, 0, 0);
+    }
+
+    void PostLogFromWorker(const std::wstring& msg) {
+        auto* heap_str = new std::wstring(msg);
+        if (!PostMessageW(hwnd_, kWmAppendLog, 0, reinterpret_cast<LPARAM>(heap_str))) {
+            delete heap_str;
+        }
+    }
+
+    void RefreshHealthAndUi(bool force_usb_speed_reprobe = false) {
+        bool running = host_running_.load(std::memory_order_acquire);
+        uint64_t now_ms = GetTickCount64();
+        bool allow_adb_query = (!running) && (force_usb_speed_reprobe || (now_ms - last_adb_probe_ms_ >= 4000ULL));
+        if (allow_adb_query) {
+            last_adb_probe_ms_ = now_ms;
+        }
+        health_ = ProbeSystemHealth(base_dir_, allow_adb_query);
+
+        // STRICT RULE: Never probe or alter selectable resolution options while actively transmitting!
+        if (!running) {
+            if (health_.android_usb == AndroidUsbState::Unplugged) {
+                if (detected_usb_speed_ != UsbLinkSpeed::Unknown) {
+                    detected_usb_speed_ = UsbLinkSpeed::Unknown;
+                    PopulateResolutionOptionsForSpeed(UsbLinkSpeed::Unknown, false);
+                }
+            } else if (force_usb_speed_reprobe ||
+                       prev_android_usb_ == AndroidUsbState::Unplugged ||
+                       detected_usb_speed_ == UsbLinkSpeed::Unknown) {
+                UsbLinkSpeed new_spd = ProbeConnectedAndroidLinkSpeed();
+                if (new_spd != detected_usb_speed_) {
+                    detected_usb_speed_ = new_spd;
+                    PopulateResolutionOptionsForSpeed(new_spd, false);
+                    uint32_t cap = MaxSelectableDimForUsbSpeed(new_spd);
+                    AppendLogLine(
+                        L"[USB-C 速率辨識] 已偵測到連接埠速率：" +
+                        Utf8ToWide(UsbLinkSpeedName(new_spd)) +
+                        L" ➔ 已開放最高 " + std::to_wstring(cap) +
+                        L"p 解析度選項（開始傳輸後將全程鎖定所選解析度，不會中途自動變動）。");
+                }
+            }
+        }
+        prev_android_usb_ = health_.android_usb;
+
+        if (running) {
+            if (running_mock_) {
+                SetWindowTextW(btn_smart_start_, L"■ 停止自測訊號");
+                SetWindowTextW(btn_mock_, L"■ 停止自測");
+            } else {
+                SetWindowTextW(btn_smart_start_, L"■ 停止 Android 投影擷取（安全移除 ADB 轉發通道）");
+                SetWindowTextW(btn_mock_, L"🧪 免手機自測");
+                EnableWindow(btn_mock_, FALSE);
+            }
+            EnableWindow(combo_conn_mode_, FALSE);
+            EnableWindow(combo_res_mode_, FALSE);
+            EnableWindow(combo_status_bar_, FALSE);
+            EnableWindow(combo_audio_, FALSE);
+            EnableWindow(chk_hw_decode_, FALSE);
+            EnableWindow(btn_repair_, FALSE);
+            EnableWindow(btn_update_, FALSE);
+        } else {
+            bool needs_setup = (health_.dshow != DshowRegState::Ready);
+            if (needs_setup) {
+                SetWindowTextW(btn_smart_start_,
+                               L"🚀 智慧一鍵啟動（自動註冊 TJCap for Android 虛擬擷取卡 ➔ 開始投影）");
+            } else {
+                SetWindowTextW(btn_smart_start_, L"▶ 開始 Android USB-C 有線投影擷取（免 Root · 免裝手機 App）");
+            }
+            SetWindowTextW(btn_mock_, L"🧪 免手機自測");
+            EnableWindow(btn_mock_, TRUE);
+            EnableWindow(combo_conn_mode_, TRUE);
+            EnableWindow(combo_res_mode_, TRUE);
+            EnableWindow(combo_status_bar_, TRUE);
+            EnableWindow(combo_audio_, TRUE);
+            EnableWindow(chk_hw_decode_, TRUE);
+            EnableWindow(btn_repair_, TRUE);
+            EnableWindow(btn_update_, checking_update_.load(std::memory_order_acquire) ? FALSE : TRUE);
+        }
+
+        InvalidateRect(hwnd_, &banner_rect_, FALSE);
+    }
+
+    void PaintStatusBanner(HDC hdc) {
+        int w = banner_rect_.right - banner_rect_.left;
+        int h = banner_rect_.bottom - banner_rect_.top;
+        if (w <= 0 || h <= 0) return;
+
+        HDC mem_dc = CreateCompatibleDC(hdc);
+        HBITMAP mem_bmp = CreateCompatibleBitmap(hdc, w, h);
+        HGDIOBJ old_bmp = SelectObject(mem_dc, mem_bmp);
+
+        bool running = host_running_.load(std::memory_order_acquire);
+        // Emerald Green TJCap for Android theme!
+        COLORREF bg_color = RGB(235, 249, 241);
+        COLORREF accent_color = RGB(16, 136, 78);
+        std::wstring headline;
+
+        if (running) {
+            bg_color = RGB(224, 248, 234);
+            accent_color = RGB(12, 146, 74);
+            headline = running_mock_
+                           ? L"🟢 TJCap for Android 正在輸出自測動態彩條與 48kHz 測試音（請開啟 OBS 預覽）"
+                           : L"🟢 TJCap for Android 有線投影執行中（已鎖定所選解析度 + 48kHz 系統內錄音訊）";
+        } else if (health_.android_usb == AndroidUsbState::PluggedUnauthorized) {
+            bg_color = RGB(255, 248, 232);
+            accent_color = RGB(180, 105, 14);
+            headline = L"📱 請解鎖 Android 手機，在螢幕彈窗勾選「一律允許」並點擊「允許 USB 偵錯」！";
+        } else if (health_.android_usb == AndroidUsbState::PluggedNoUsbDebug) {
+            bg_color = RGB(255, 248, 232);
+            accent_color = RGB(180, 105, 14);
+            headline = L"⚡ 已偵測 Android 手機！請開啟手機「開發者選項 ➔ USB 偵錯」（點下方教學看步驟）";
+        } else if (health_.dshow != DshowRegState::Ready) {
+            bg_color = RGB(236, 250, 242);
+            accent_color = RGB(18, 134, 76);
+            headline = L"🚀 準備開始：點擊下方「智慧一鍵啟動」自動註冊虛擬擷取卡並開始 2K+ 原生投影";
+        } else if (health_.android_usb == AndroidUsbState::PluggedReady) {
+            bg_color = RGB(228, 248, 236);
+            accent_color = RGB(14, 140, 76);
+            headline = L"✅ Android 裝置與虛擬擷取卡皆已就緒！確認畫質後點擊「開始有線投影擷取」";
+        } else {
+            bg_color = RGB(238, 248, 242);
+            accent_color = RGB(20, 132, 76);
+            headline = L"🔌 TJCap for Android 已就緒 — 插上已開「USB 偵錯」的手機/平板自動辨識速率";
+        }
+
+        RECT local_rc{0, 0, w, h};
+        HBRUSH bg_brush = CreateSolidBrush(bg_color);
+        FillRect(mem_dc, &local_rc, bg_brush);
+        DeleteObject(bg_brush);
+
+        UINT dpi = GetSystemDpiSafe(hwnd_);
+        RECT stripe{0, 0, Scale(6, dpi), h};
+        HBRUSH acc_brush = CreateSolidBrush(accent_color);
+        FillRect(mem_dc, &stripe, acc_brush);
+        FrameRect(mem_dc, &local_rc, acc_brush);
+        DeleteObject(acc_brush);
+
+        int icon_sz = Scale(64, dpi);
+        int right_limit = icon_banner_ ? (w - icon_sz - Scale(26, dpi)) : (w - Scale(12, dpi));
+        if (icon_banner_) {
+            DrawIconEx(
+                mem_dc,
+                w - icon_sz - Scale(16, dpi),
+                (h - icon_sz) / 2,
+                icon_banner_,
+                icon_sz,
+                icon_sz,
+                0,
+                nullptr,
+                DI_NORMAL);
+        }
+
+        SetBkMode(mem_dc, TRANSPARENT);
+        HGDIOBJ old_font = SelectObject(mem_dc, font_title_);
+        SetTextColor(mem_dc, accent_color);
+        RECT title_rc{Scale(18, dpi), Scale(12, dpi), right_limit, Scale(42, dpi)};
+        DrawTextW(mem_dc, headline.c_str(), -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SelectObject(mem_dc, font_normal_);
+        SetTextColor(mem_dc, RGB(32, 46, 38));
+
+        std::wstring dshow_txt;
+        if (health_.dshow == DshowRegState::Ready) {
+            dshow_txt = L"• DirectShow 虛擬擷取卡 (TJCap for Android)：✅ 已安裝";
+        } else if (health_.dshow == DshowRegState::PathMismatch) {
+            dshow_txt = L"• DirectShow 虛擬擷取卡 (TJCap for Android)：⚠️ 資料夾已移動（點一鍵啟動自動更新）";
+        } else {
+            dshow_txt = L"• DirectShow 虛擬擷取卡 (TJCap for Android)：⏳ 尚未註冊（點一鍵啟動自動完成）";
+        }
+
+        std::wstring usb_drv_txt = (health_.adb_runtime_ok && health_.server_jar_ok)
+                                       ? L"• 免裝手機 App 直連引擎 (WinUSB ADB + H.264)：✅ 內建就緒"
+                                       : L"• 免裝手機 App 直連引擎：❌ 缺少 runtime 檔案";
+        if (cached_update_.update_available) {
+            usb_drv_txt += L"   ｜   🎉 發現新版 " + Utf8ToWide(cached_update_.latest.tag_name) + L" 可一鍵升級！";
+        } else {
+            usb_drv_txt += L"   ｜   目前版本：v" ANDROID_VCAM_VER_DISPLAY_WSTR;
+        }
+
+        std::wstring speed_badge = FormatUsbSpeedBadgeWide(detected_usb_speed_);
+        std::wstring speed_suffix = speed_badge.empty() ? L"" : (L" [" + speed_badge + L"]");
+        std::wstring model_tag = health_.android_device_desc.empty()
+                                     ? L""
+                                     : (L" (" + health_.android_device_desc + L")");
+
+        std::wstring phone_txt;
+        switch (health_.android_usb) {
+            case AndroidUsbState::PluggedReady:
+                phone_txt = L"• Android USB-C：✅ 已連線授權" + model_tag + speed_suffix;
+                break;
+            case AndroidUsbState::PluggedUnauthorized:
+                phone_txt = L"• Android USB-C：🔐 等待手機螢幕點擊「允許 USB 偵錯」" + speed_suffix;
+                break;
+            case AndroidUsbState::PluggedNoUsbDebug:
+                phone_txt = L"• Android USB-C：📱 已偵測連線，請開啟手機「USB 偵錯」" + speed_suffix;
+                break;
+            case AndroidUsbState::PluggedOffline:
+                phone_txt = L"• Android USB-C：⚠️ ADB 離線（請重插 USB-C 線材）" + speed_suffix;
+                break;
+            case AndroidUsbState::Unplugged:
+                phone_txt = L"• Android USB-C：🔌 尚未插入 USB-C（插入後自動辨識 USB 3.x / 2.0 速率並更新可選上限）";
+                break;
+        }
+
+        RECT line1{Scale(20, dpi), Scale(46, dpi), right_limit, Scale(68, dpi)};
+        RECT line2{Scale(20, dpi), Scale(70, dpi), right_limit, Scale(92, dpi)};
+        RECT line3{Scale(20, dpi), Scale(94, dpi), right_limit, Scale(116, dpi)};
+        DrawTextW(mem_dc, dshow_txt.c_str(), -1, &line1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(mem_dc, usb_drv_txt.c_str(), -1, &line2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(mem_dc, phone_txt.c_str(), -1, &line3, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SelectObject(mem_dc, old_font);
+        BitBlt(hdc, banner_rect_.left, banner_rect_.top, w, h, mem_dc, 0, 0, SRCCOPY);
+        SelectObject(mem_dc, old_bmp);
+        DeleteObject(mem_bmp);
+        DeleteDC(mem_dc);
+    }
+
+    bool RunDriverSetupElevated(const wchar_t* arg_flag) {
+        std::filesystem::path exe = base_dir_ / L"android_vcam_driver_setup.exe";
+        if (!std::filesystem::exists(exe)) {
+            AppendLogLine(L"[錯誤] 找不到 android_vcam_driver_setup.exe，請確認程式資料夾檔案完整！");
+            MessageBoxW(hwnd_, L"找不到 android_vcam_driver_setup.exe，請確認完整安裝或解壓縮 TJCap for Android 資料夾！",
+                        L"缺少檔案", MB_ICONERROR | MB_OK);
+            return false;
+        }
+
+        AppendLogLine(std::wstring(L"[系統] 正在請求系統管理員權限執行 android_vcam_driver_setup.exe ") + arg_flag + L" ...");
+
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.hwnd = hwnd_;
+        sei.lpVerb = L"runas";
+        sei.lpFile = exe.c_str();
+        sei.lpParameters = arg_flag;
+        sei.lpDirectory = base_dir_.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (!ShellExecuteExW(&sei)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_CANCELLED) {
+                AppendLogLine(L"[取消] 使用者取消了管理員權限授權 (UAC)。");
+            } else {
+                AppendLogLine(L"[錯誤] 無法啟動安裝輔助程式 (錯誤碼 " + std::to_wstring(err) + L")。");
+            }
+            return false;
+        }
+
+        if (sei.hProcess) {
+            while (WaitForSingleObject(sei.hProcess, 50) == WAIT_TIMEOUT) {
+                MSG msg{};
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            DWORD exit_code = 1;
+            GetExitCodeProcess(sei.hProcess, &exit_code);
+            CloseHandle(sei.hProcess);
+            RefreshHealthAndUi(true);
+            if (exit_code == 0) {
+                AppendLogLine(L"[成功] TJCap for Android 虛擬擷取卡與內建 ADB 服務設定完成！");
+                return true;
+            }
+            AppendLogLine(L"[提醒] 設定程式回傳代碼 " + std::to_wstring(exit_code) + L"，請確認檔案完整或重試。");
+            return false;
+        }
+        RefreshHealthAndUi(true);
+        return true;
+    }
+
+    std::wstring GetLogTextWide() const {
+        if (!edit_log_) return {};
+        int len = GetWindowTextLengthW(edit_log_);
+        if (len <= 0) return {};
+        std::wstring buf(static_cast<size_t>(len) + 1, L'\0');
+        int copied = GetWindowTextW(edit_log_, buf.data(), len + 1);
+        if (copied <= 0) return {};
+        buf.resize(static_cast<size_t>(copied));
+        return buf;
+    }
+
+    void UpdateDiagnosticsButtonBadge() {
+        if (btn_diagnostics_) {
+            if (recent_faults_.empty()) {
+                SetWindowTextW(btn_diagnostics_, L"🩺 診斷報錯");
+            } else {
+                std::wstring lbl = L"⚠️ 診斷報錯 (" + std::to_wstring(recent_faults_.size()) + L")";
+                SetWindowTextW(btn_diagnostics_, lbl.c_str());
+            }
+        }
+        if (hwnd_) {
+            InvalidateRect(hwnd_, &telemetry_rect_, FALSE);
+            InvalidateRect(hwnd_, &banner_rect_, FALSE);
+        }
+    }
+
+    void OpenDiagnosticsModal() {
+        if (!hwnd_ || shutting_down_.load(std::memory_order_acquire)) return;
+        UINT dpi = GetSystemDpiSafe(hwnd_);
+        DiagnosticsModalWindow dlg(
+            hinst_,
+            hwnd_,
+            base_dir_,
+            dpi,
+            font_normal_,
+            font_bold_,
+            font_title_,
+            font_mono_,
+            icon_small_,
+            detected_usb_speed_,
+            telem_snap_,
+            recent_faults_,
+            GetLogTextWide(),
+            [this]() {
+                health_ = ProbeSystemHealth(base_dir_, true);
+                return health_;
+            },
+            [this]() {
+                if (host_running_.load(std::memory_order_acquire)) {
+                    StopHostProcess();
+                }
+                return RunDriverSetupElevated(L"--install");
+            },
+            [this]() {
+                recent_faults_.clear();
+                UpdateDiagnosticsButtonBadge();
+            });
+        dlg.RunModal();
+    }
+
+    void RecordDiagnosticFault(
+        DiagCode code,
+        DiagSeverity sev,
+        const std::wstring& detail,
+        bool auto_open_modal = false) {
+        if (code == DiagCode::None) return;
+
+        bool duplicate_tail = (!recent_faults_.empty() &&
+                               recent_faults_.back().code == code &&
+                               recent_faults_.back().detail_wide == detail);
+        if (duplicate_tail) {
+            recent_faults_.back().timestamp_str = CurrentLocalTimeShortWide();
+            recent_faults_.back().severity = std::max(recent_faults_.back().severity, sev);
+        } else {
+            constexpr size_t kMaxStoredFaults = 25;
+            if (recent_faults_.size() >= kMaxStoredFaults) {
+                recent_faults_.erase(recent_faults_.begin());
+            }
+            recent_faults_.push_back(DiagEventRecord{
+                code,
+                sev,
+                CurrentLocalTimeShortWide(),
+                detail,
+            });
+
+            const auto& spec = LookupDiagSpec(code);
+            AppendLogLine(
+                L"[異常偵測 " + Utf8ToWide(spec.code_str) + L"] " +
+                Utf8ToWide(spec.title_utf8) + L" — " + detail +
+                L"（點「🩺 診斷報錯」檢視排除步驟或一鍵回報）");
+        }
+
+        UpdateDiagnosticsButtonBadge();
+        if (auto_open_modal && !shutting_down_.load(std::memory_order_acquire)) {
+            OpenDiagnosticsModal();
+        }
+    }
+
+    void StartHostProcess(bool mock_mode) {
+        if (host_running_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        health_ = ProbeSystemHealth(base_dir_, !mock_mode);
+        if (!health_.missing_core_files.empty()) {
+            std::wstring missing_list;
+            for (size_t i = 0; i < health_.missing_core_files.size(); ++i) {
+                if (i > 0) missing_list += L"、";
+                missing_list += health_.missing_core_files[i];
+            }
+            RecordDiagnosticFault(
+                DiagCode::E101_MissingCoreFiles,
+                DiagSeverity::Critical,
+                L"程式目錄缺少必要元件：" + missing_list + L"，請重新完整解壓縮或執行安裝程式。",
+                true);
+            return;
+        }
+
+        if (!mock_mode && !health_.mf_h264_ok) {
+            RecordDiagnosticFault(
+                DiagCode::E103_MissingMediaFoundation,
+                DiagSeverity::Critical,
+                L"系統缺少 mfplat.dll 或 msmpeg2vdec.dll（Windows N / KN 版本請先安裝媒體功能套件）。",
+                true);
+            return;
+        }
+
+        std::filesystem::path host_exe = base_dir_ / L"android_vcam_host.exe";
+        if (health_.dshow != DshowRegState::Ready) {
+            if (!RunDriverSetupElevated(L"--install")) return;
+        }
+        if (!mock_mode) {
+            if (health_.android_usb == AndroidUsbState::Unplugged) {
+                AppendLogLine(L"[提示] 目前尚未插入 Android 手機，已進入自動等待連線模式；插上已開「USB 偵錯」的手機並允許授權後即會自動出畫！");
+            } else if (health_.android_usb == AndroidUsbState::PluggedNoUsbDebug) {
+                AppendLogLine(L"[提醒] 已偵測 Android USB 連線，但手機尚未開啟「開發者選項 ➔ USB 偵錯」，開啟後無需重啟即會自動連上！");
+            } else if (health_.android_usb == AndroidUsbState::PluggedUnauthorized) {
+                AppendLogLine(L"[提醒] 請在手機螢幕彈出的「允許 USB 偵錯嗎？」勾選一律允許並點「確定」，點選後將立即自動開始串流！");
+            } else {
+                RefreshHealthAndUi(true);
+            }
+        }
+
+        std::wstring event_name = L"Local\\AndroidUsbVcamGuiStop_" + std::to_wstring(GetCurrentProcessId()) +
+                                  L"_" + std::to_wstring(GetTickCount64());
+        HANDLE hStopEvt = CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
+        if (!hStopEvt) {
+            AppendLogLine(L"[錯誤] 無法建立跨行程控制事件。");
+            return;
+        }
+
+        SECURITY_ATTRIBUTES sa{};
+        sa.nLength = sizeof(sa);
+        sa.bInheritHandle = TRUE;
+        HANDLE read_pipe = nullptr, write_pipe = nullptr;
+        if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
+            CloseHandle(hStopEvt);
+            return;
+        }
+        SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+        std::wstring cmd = L"\"" + host_exe.wstring() + L"\" --stop-event " + event_name;
+
+        LRESULT res_idx = SendMessageW(combo_res_mode_, CB_GETCURSEL, 0, 0);
+        std::wstring chosen_res_label = L"預設自適應上限";
+        if (res_idx >= 0 && static_cast<size_t>(res_idx) < res_options_.size()) {
+            cmd += res_options_[static_cast<size_t>(res_idx)].cli_args;
+            chosen_res_label = res_options_[static_cast<size_t>(res_idx)].label;
+        } else {
+            cmd += L" --res native --max-dim 2560";
+        }
+
+        if (mock_mode) {
+            cmd += L" --mock";
+        } else {
+            LRESULT conn_idx = SendMessageW(combo_conn_mode_, CB_GETCURSEL, 0, 0);
+            if (conn_idx == 1) {
+                cmd += L" --conn aoa";
+            } else if (conn_idx == 2) {
+                cmd += L" --conn auto";
+            } else {
+                cmd += L" --conn adb";
+            }
+            LRESULT bar_idx = SendMessageW(combo_status_bar_, CB_GETCURSEL, 0, 0);
+            if (bar_idx == 1) {
+                cmd += L" --fps 120 --orient lock";
+            } else if (bar_idx == 2) {
+                cmd += L" --fps 60 --orient auto";
+            } else {
+                cmd += L" --fps 60 --orient lock";
+            }
+            if (SendMessageW(chk_hw_decode_, BM_GETCHECK, 0, 0) != BST_CHECKED) {
+                cmd += L" --sw-decode";
+            }
+        }
+
+        LRESULT aud_idx = SendMessageW(combo_audio_, CB_GETCURSEL, 0, 0);
+        if (aud_idx >= 0 && static_cast<size_t>(aud_idx) < audio_endpoint_matches_.size()) {
+            const std::wstring& choice = audio_endpoint_matches_[static_cast<size_t>(aud_idx)];
+            if (choice == L"__NONE__") {
+                cmd += L" --no-audio-route";
+            } else if (choice != L"__AUTO__") {
+                cmd += L" --audio-out \"" + choice + L"\"";
+            }
+        }
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdOutput = write_pipe;
+        si.hStdError = write_pipe;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+        cmd_buf.push_back(L'\0');
+
+        user_stopping_host_.store(false, std::memory_order_release);
+        session_critical_fault_seen_ = false;
+
+        BOOL ok = CreateProcessW(
+            host_exe.c_str(),
+            cmd_buf.data(),
+            nullptr,
+            nullptr,
+            TRUE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            base_dir_.c_str(),
+            &si,
+            &pi);
+
+        CloseHandle(write_pipe);
+
+        if (!ok) {
+            DWORD err = GetLastError();
+            CloseHandle(read_pipe);
+            CloseHandle(hStopEvt);
+            RecordDiagnosticFault(
+                DiagCode::E503_HostUnexpectedExit,
+                DiagSeverity::Critical,
+                L"無法啟動背景擷取引擎 android_vcam_host.exe（Windows 錯誤碼 " + std::to_wstring(err) + L"）。",
+                true);
+            return;
+        }
+
+        CloseHandle(pi.hThread);
+        {
+            std::lock_guard<std::mutex> lk(proc_mtx_);
+            host_process_ = pi.hProcess;
+            host_stop_event_ = hStopEvt;
+        }
+        running_mock_ = mock_mode;
+        host_running_.store(true, std::memory_order_release);
+        fps_history_.clear();
+        mbps_history_.clear();
+        RefreshHealthAndUi(false);
+        TickTelemetryDashboard(true);
+
+        AppendLogLine(mock_mode ? L"=== 已啟動 TJCap 免手機自測模式（彩條 + 48kHz 測試音） ==="
+                                : (L"=== 已啟動 TJCap 有線投影｜本次鎖定選項：" + chosen_res_label + L" ==="));
+
+        if (log_reader_thread_.joinable()) {
+            log_reader_thread_.join();
+        }
+        log_reader_thread_ = std::thread([this, read_pipe, hProc = pi.hProcess]() {
+            auto dispatch_line = [this](const std::string& raw_line) {
+                if (raw_line.empty()) return;
+                ParsedDiagEvent pev;
+                if (ParseHostDiagLine(raw_line, pev)) {
+                    auto* heap_ev = new ParsedDiagEvent(std::move(pev));
+                    if (!PostMessageW(hwnd_, kWmHostDiagEvent, 0, reinterpret_cast<LPARAM>(heap_ev))) {
+                        delete heap_ev;
+                    }
+                } else {
+                    PostLogFromWorker(Utf8ToWide(raw_line));
+                }
+            };
+
+            char buf[1024];
+            std::string pending;
+            DWORD bytes_read = 0;
+            while (ReadFile(read_pipe, buf, sizeof(buf) - 1, &bytes_read, nullptr) && bytes_read > 0) {
+                pending.append(buf, bytes_read);
+                size_t nl = 0;
+                while ((nl = pending.find('\n')) != std::string::npos) {
+                    std::string line = pending.substr(0, nl);
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    pending.erase(0, nl + 1);
+                    dispatch_line(line);
+                }
+            }
+            if (!pending.empty()) {
+                if (pending.back() == '\r') pending.pop_back();
+                dispatch_line(pending);
+            }
+            CloseHandle(read_pipe);
+            WaitForSingleObject(hProc, 3000);
+            DWORD exit_code = 0;
+            if (!GetExitCodeProcess(hProc, &exit_code) || exit_code == STILL_ACTIVE) {
+                exit_code = 0;
+            }
+            bool manual_stop = user_stopping_host_.load(std::memory_order_acquire);
+            PostMessageW(hwnd_, kWmHostExited, static_cast<WPARAM>(exit_code), manual_stop ? 1 : 0);
+        });
+    }
+
+    void StopHostProcess() {
+        user_stopping_host_.store(true, std::memory_order_release);
+
+        HANDLE hProc = nullptr;
+        HANDLE hEvt = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(proc_mtx_);
+            hProc = host_process_;
+            hEvt = host_stop_event_;
+            host_process_ = nullptr;
+            host_stop_event_ = nullptr;
+        }
+
+        if (hEvt) {
+            SetEvent(hEvt);
+        }
+        if (hProc) {
+            if (WaitForSingleObject(hProc, 3500) == WAIT_TIMEOUT) {
+                TerminateProcess(hProc, 0);
+            }
+        }
+        if (log_reader_thread_.joinable()) {
+            log_reader_thread_.join();
+        }
+        if (hProc) {
+            CloseHandle(hProc);
+        }
+        if (hEvt) {
+            CloseHandle(hEvt);
+        }
+        host_running_.store(false, std::memory_order_release);
+        running_mock_ = false;
+        fps_history_.clear();
+        mbps_history_.clear();
+        RefreshHealthAndUi(true);
+        TickInlinePreview(true);
+        TickTelemetryDashboard(true);
+    }
+
+    void OpenCompanionApkFolder() {
+        std::filesystem::path apk_file = base_dir_ / L"companion" / L"TJCap-Companion-v1.0.0.apk";
+        std::filesystem::path apk_dir = base_dir_ / L"companion";
+        std::error_code ec;
+        if (std::filesystem::exists(apk_file, ec)) {
+            std::wstring param = L"/select,\"" + apk_file.wstring() + L"\"";
+            ShellExecuteW(hwnd_, L"open", L"explorer.exe", param.c_str(), nullptr, SW_SHOWNORMAL);
+            AppendLogLine(L"[Companion APK] 已開啟 companion 資料夾，請將 TJCap-Companion-v1.0.0.apk 傳至手機安裝（免開 USB 偵錯即可透過 AOA 配件直連）！");
+        } else {
+            ShellExecuteW(hwnd_, L"open", base_dir_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            AppendLogLine(L"[提醒] 未在 companion 資料夾找到 APK，請確認已完整解壓縮發行套件。");
+        }
+    }
+
+    void ShowAndCopyObsGuide() {
+        const wchar_t* guide =
+            L"【備援方案：🛡️ 免開 USB 偵錯模式（TJCap Companion APK + USB AOA）】\r\n"
+            L"• 適用情境：禁止開啟「開發者選項／USB 偵錯」的手遊或公司設備！\r\n"
+            L"• 步驟：點擊主視窗「📲 取得 APK」將 TJCap-Companion-v1.0.0.apk 傳到手機安裝 ➔ 連線模式選「🛡️ 免開 USB 偵錯備援 (AOA)」點啟動 ➔ 手機自動喚醒 App 後點「開始錄製」即可！\r\n\r\n"
+            L"【預設推薦：⚡ 免裝手機 App 直連（「USB 偵錯」一次性設定）】\r\n"
+            L"1. 開啟手機「設定 ➔ 關於手機」（小米為「我的裝置」，三星為「關於手機 ➔ 軟體資訊」）\r\n"
+            L"2. 連續點擊 7 下「版本號碼」（小米為「OS 版本」）直到提示「已成為開發人員」\r\n"
+            L"3. 返回「設定 ➔ 系統（或更多設定）➔ 開發者選項」，開啟「USB 偵錯」！\r\n"
+            L"   • OPPO / Realme / OnePlus：建議一併關閉開發者選項底部的「權限監控」\r\n"
+            L"   • 小米 / Redmi / POCO：僅需開一般「USB 偵錯」，免插卡、免開安全設定！\r\n"
+            L"4. 插上 USB-C 傳輸線，在手機彈出的視窗勾選「一律允許」並點「允許」！\r\n\r\n"
+            L"【二、OBS Studio / Discord / Zoom 滿版自適應設定步驟】\r\n"
+            L"1. 先在本程式點擊「🚀 智慧一鍵啟動」\r\n"
+            L"   💡 若只想把電腦當外接大螢幕，直接點右下角「🖥 獨立大視窗」（F11 無邊框全螢幕、F12 原畫質截圖），免開 OBS！\r\n"
+            L"2. 開啟 OBS Studio ➔ 新增「視訊擷取裝置」➔ 選擇：TJCap for Android (Video)\r\n"
+            L"3.「解析度/FPS 類型」保持「裝置預設值」：OBS 自動抓滿版原生比例、零黑邊！\r\n"
+            L"4. 往下捲動勾選「使用自訂音訊裝置」➔ 選擇：TJCap for Android (Audio)（支援 Android 11+ 原生系統內錄立體聲！）\r\n\r\n"
+            L"（裝置名稱已複製到剪貼簿：TJCap for Android (Video)）";
+
+        CopyWideTextToClipboard(hwnd_, L"TJCap for Android (Video)");
+        AppendLogLine(L"[教學] 已將 'TJCap for Android (Video)' 複製到剪貼簿，並顯示 USB 偵錯與 OBS 設定教學。");
+        MessageBoxW(hwnd_, guide, L"TJCap for Android — USB 偵錯與 OBS 直播教學", MB_ICONINFORMATION | MB_OK);
+    }
+
+    void OpenUpdateDialog(const UpdateCheckResult& info) {
+        UINT dpi = GetSystemDpiSafe(hwnd_);
+        UpdateModalWindow dlg(
+            hinst_,
+            hwnd_,
+            base_dir_,
+            info,
+            dpi,
+            font_normal_,
+            font_bold_,
+            font_title_,
+            font_mono_,
+            icon_small_,
+            [this]() {
+                if (host_running_.load(std::memory_order_acquire)) {
+                    StopHostProcess();
+                }
+            });
+        if (dlg.RunModal()) {
+            AppendLogLine(L"[軟體更新] 已啟動自動更新程序，正在關閉目前視窗以完成替換...");
+            PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        }
+    }
+
+    void StartAsyncUpdateCheck(bool manual_trigger) {
+        if (checking_update_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        if (manual_trigger) {
+            SetWindowTextW(btn_update_, L"⏳ 檢查中...");
+            EnableWindow(btn_update_, FALSE);
+            AppendLogLine(L"[更新檢查] 正在連線至 GitHub Releases API 檢查最新版本...");
+        }
+
+        if (update_check_thread_.joinable()) {
+            update_check_thread_.join();
+        }
+
+        HWND target_hwnd = hwnd_;
+        update_check_thread_ = std::thread([this, target_hwnd, manual_trigger]() {
+            UpdateCheckResult res = CheckGitHubLatestRelease(
+                ANDROID_VCAM_GITHUB_OWNER, ANDROID_VCAM_GITHUB_REPO, ANDROID_VCAM_VER_DISPLAY_STR);
+            if (shutting_down_.load(std::memory_order_acquire)) {
+                checking_update_.store(false, std::memory_order_release);
+                return;
+            }
+            auto* heap_res = new UpdateCheckResult(std::move(res));
+            if (!PostMessageW(
+                    target_hwnd,
+                    kWmUpdateCheckDone,
+                    manual_trigger ? 1 : 0,
+                    reinterpret_cast<LPARAM>(heap_res))) {
+                delete heap_res;
+                checking_update_.store(false, std::memory_order_release);
+            }
+        });
+    }
+
+    void OnUpdateCheckCompleted(bool manual_trigger, const UpdateCheckResult& res) {
+        checking_update_.store(false, std::memory_order_release);
+        if (!host_running_.load(std::memory_order_acquire)) {
+            EnableWindow(btn_update_, TRUE);
+        }
+
+        if (!res.ok) {
+            std::wstring restore_lbl = cached_update_.update_available
+                                           ? (L"⬆️ 升級 " + Utf8ToWide(cached_update_.latest.tag_name))
+                                           : L"🔄 檢查更新";
+            SetWindowTextW(btn_update_, restore_lbl.c_str());
+
+            if (manual_trigger) {
+                std::wstring werr = Utf8ToWide(res.error_message);
+                AppendLogLine(L"[更新檢查失敗] " + werr);
+                std::wstring prompt =
+                    L"無法從 GitHub Releases API 取得版本資訊：\r\n" + werr +
+                    L"\r\n\r\n是否直接以瀏覽器開啟 GitHub Releases 發布頁面查看？";
+                if (MessageBoxW(hwnd_, prompt.c_str(), L"檢查更新失敗", MB_ICONWARNING | MB_YESNO) == IDYES) {
+                    ShellExecuteW(
+                        hwnd_,
+                        L"open",
+                        L"https://github.com/" ANDROID_VCAM_GITHUB_OWNER_W L"/" ANDROID_VCAM_GITHUB_REPO_W L"/releases/latest",
+                        nullptr,
+                        nullptr,
+                        SW_SHOWNORMAL);
+                }
+            }
+            return;
+        }
+
+        cached_update_ = res;
+        if (!res.update_available) {
+            SetWindowTextW(btn_update_, L"🔄 檢查更新");
+            InvalidateRect(hwnd_, &banner_rect_, FALSE);
+            AppendLogLine(
+                L"[更新檢查] 目前已是最新版本 (v" ANDROID_VCAM_VER_DISPLAY_WSTR L"，GitHub 最新發布：" +
+                Utf8ToWide(res.latest.tag_name) + L")。");
+
+            if (manual_trigger) {
+                std::wstring msg =
+                    L"您目前使用的 TJCap for Android v" ANDROID_VCAM_VER_DISPLAY_WSTR L" 已是最新版本！\r\n\r\n"
+                    L"• GitHub 最新版本：" + Utf8ToWide(res.latest.tag_name) + L"\r\n" +
+                    (res.latest.published_at.empty()
+                         ? L""
+                         : (L"• 發布時間：" + Utf8ToWide(res.latest.published_at) + L"\r\n")) +
+                    L"\r\n是否開啟 GitHub Releases 網頁查看完整歷史更新日誌？";
+                if (MessageBoxW(hwnd_, msg.c_str(), L"已是最新版本", MB_ICONINFORMATION | MB_YESNO) == IDYES) {
+                    OpenSafeGitHubWebUrl(hwnd_, res.latest.html_url);
+                }
+            }
+            return;
+        }
+
+        std::wstring up_lbl = L"⬆️ 升級 " + Utf8ToWide(res.latest.tag_name);
+        SetWindowTextW(btn_update_, up_lbl.c_str());
+        InvalidateRect(hwnd_, &banner_rect_, FALSE);
+        AppendLogLine(
+            L"[發現新版本] 🎉 GitHub 已發布 TJCap for Android " + Utf8ToWide(res.latest.tag_name) +
+            L"！點擊「" + up_lbl + L"」即可檢視更新日誌並一鍵自動升級。");
+
+        if (manual_trigger && !host_running_.load(std::memory_order_acquire)) {
+            OpenUpdateDialog(cached_update_);
+        }
+    }
+
+    void ShowInlineToast(const std::wstring& text, uint64_t duration_ms = 2400) {
+        inline_toast_text_ = text;
+        inline_toast_until_ms_ = GetTickCount64() + duration_ms;
+        if (hwnd_) {
+            InvalidateRect(hwnd_, &preview_rect_, FALSE);
+        }
+    }
+
+    void TickInlinePreview(bool force) {
+        if (!hwnd_ || IsIconic(hwnd_)) return;
+
+        bool toast_expired = (!inline_toast_text_.empty() && GetTickCount64() >= inline_toast_until_ms_);
+        if (toast_expired) {
+            inline_toast_text_.clear();
+        }
+
+        if (!inline_preview_enabled_) {
+            if (inline_has_frame_ || toast_expired) {
+                inline_has_frame_ = false;
+                inline_last_seq_ = 0;
+                inline_bgra_.clear();
+                InvalidateRect(hwnd_, &preview_rect_, FALSE);
+            }
+            return;
+        }
+
+        uint32_t pw = static_cast<uint32_t>(std::max<LONG>(4, (preview_rect_.right - preview_rect_.left) - 2));
+        uint32_t ph = static_cast<uint32_t>(std::max<LONG>(4, (preview_rect_.bottom - preview_rect_.top) - 2));
+
+        if (!preview_shm_.IsOpen()) {
+            preview_shm_.Open(kDefaultShmName);
+        }
+
+        bool updated = false;
+        uint32_t fit_w = 0, fit_h = 0, sw = 0, sh = 0, kbps = 0;
+        bool alive = preview_shm_.ReadLatestPreviewBGRA32(
+            pw,
+            ph,
+            force || inline_force_refresh_,
+            inline_last_seq_,
+            inline_bgra_,
+            fit_w,
+            fit_h,
+            sw,
+            sh,
+            &updated,
+            &kbps);
+        inline_force_refresh_ = false;
+
+        if (alive) {
+            bool state_changed = (!inline_has_frame_ || sw != inline_src_w_ || sh != inline_src_h_);
+            inline_has_frame_ = true;
+            inline_fit_w_ = fit_w;
+            inline_fit_h_ = fit_h;
+            inline_src_w_ = sw;
+            inline_src_h_ = sh;
+            inline_bitrate_kbps_ = kbps;
+            if (updated || state_changed || toast_expired) {
+                InvalidateRect(hwnd_, &preview_rect_, FALSE);
+            }
+        } else if (inline_has_frame_ || toast_expired) {
+            inline_has_frame_ = false;
+            inline_last_seq_ = 0;
+            inline_src_w_ = 0;
+            inline_src_h_ = 0;
+            inline_bitrate_kbps_ = 0;
+            InvalidateRect(hwnd_, &preview_rect_, FALSE);
+        }
+    }
+
+    void TickTelemetryDashboard(bool force) {
+        if (!hwnd_ || IsIconic(hwnd_)) return;
+
+        if (!telemetry_shm_.IsOpen()) {
+            telemetry_shm_.Open(kDefaultShmName);
+        }
+
+        StreamHealthSnapshot prev = telem_snap_;
+        bool ok = telemetry_shm_.ReadStreamHealth(telem_snap_);
+        if (!ok && host_running_.load(std::memory_order_acquire)) {
+            telem_snap_ = StreamHealthSnapshot{};
+            telem_snap_.active = true;
+            telem_snap_.waiting_first_frame = true;
+            telem_snap_.grade = StreamHealthGrade::WaitingStream;
+        }
+
+        constexpr size_t kMaxSparkSamples = 28;
+        if (telem_snap_.active && !telem_snap_.waiting_first_frame) {
+            fps_history_.push_back(telem_snap_.fps);
+            if (fps_history_.size() > kMaxSparkSamples) {
+                fps_history_.erase(fps_history_.begin());
+            }
+            mbps_history_.push_back(telem_snap_.bitrate_mbps);
+            if (mbps_history_.size() > kMaxSparkSamples) {
+                mbps_history_.erase(mbps_history_.begin());
+            }
+        } else if (!telem_snap_.active && (!fps_history_.empty() || !mbps_history_.empty())) {
+            fps_history_.clear();
+            mbps_history_.clear();
+        }
+
+        if (force || telem_snap_.active || prev.active != telem_snap_.active ||
+            prev.grade != telem_snap_.grade) {
+            InvalidateRect(hwnd_, &telemetry_rect_, FALSE);
+            if (inline_preview_enabled_ && inline_has_frame_) {
+                InvalidateRect(hwnd_, &preview_rect_, FALSE);
+            }
+        }
+    }
+
+    void PaintTelemetryDashboard(HDC dst_hdc) {
+        int w = telemetry_rect_.right - telemetry_rect_.left;
+        int h = telemetry_rect_.bottom - telemetry_rect_.top;
+        if (w <= 8 || h <= 8) return;
+
+        UINT dpi = GetSystemDpiSafe(hwnd_);
+        HDC mem_dc = CreateCompatibleDC(dst_hdc);
+        HBITMAP mem_bmp = CreateCompatibleBitmap(dst_hdc, w, h);
+        HGDIOBJ old_bmp = SelectObject(mem_dc, mem_bmp);
+
+        RECT local_rc{0, 0, w, h};
+        HBRUSH bg_br = CreateSolidBrush(RGB(12, 22, 17));
+        FillRect(mem_dc, &local_rc, bg_br);
+        DeleteObject(bg_br);
+
+        SetBkMode(mem_dc, TRANSPARENT);
+        HGDIOBJ old_font = SelectObject(mem_dc, font_small_);
+
+        const StreamHealthSnapshot& s = telem_snap_;
+        const bool streaming = s.active && !s.waiting_first_frame;
+        const int card_w = w / 4;
+        const int pad_x = Scale(11, dpi);
+        const int accent_h = std::max(2, Scale(3, dpi));
+
+        auto draw_card_frame = [&](int idx, COLORREF accent) {
+            int x0 = idx * card_w;
+            int x1 = (idx == 3) ? w : ((idx + 1) * card_w);
+            RECT top_bar{x0 + 1, 1, x1 - 1, 1 + accent_h};
+            HBRUSH acc_br = CreateSolidBrush(accent);
+            FillRect(mem_dc, &top_bar, acc_br);
+            DeleteObject(acc_br);
+            if (idx > 0) {
+                RECT div_rc{x0, Scale(8, dpi), x0 + 1, h - Scale(8, dpi)};
+                HBRUSH div_br = CreateSolidBrush(RGB(28, 52, 40));
+                FillRect(mem_dc, &div_rc, div_br);
+                DeleteObject(div_br);
+            }
+        };
+
+        // --- Card 0: Real-time FPS + Sparkline ---
+        COLORREF fps_col = RGB(100, 116, 139);
+        std::wstring fps_val = L"--.- fps";
+        std::wstring fps_sub = L"目標 60fps 低抖動輸出";
+        if (s.waiting_first_frame) {
+            fps_col = RGB(251, 191, 36);
+            fps_val = L"等待中...";
+            fps_sub = L"等待手機傳送首張影格";
+        } else if (streaming) {
+            wchar_t vbuf[48] = {0};
+            std::swprintf(vbuf, 48, L"%.1f fps", s.fps);
+            fps_val = vbuf;
+            if (s.grade == StreamHealthGrade::StaticVfr) {
+                fps_col = RGB(45, 212, 191);
+            } else if (s.fps >= 45.0) {
+                fps_col = RGB(74, 222, 128);
+            } else if (s.fps >= 22.0) {
+                fps_col = RGB(251, 191, 36);
+            } else {
+                fps_col = RGB(248, 113, 113);
+            }
+            wchar_t sbuf[80] = {0};
+            std::swprintf(
+                sbuf,
+                80,
+                L"累計 %llu 幀 ｜ 掉幀 %u",
+                static_cast<unsigned long long>(s.total_frames),
+                s.dropped_frames);
+            fps_sub = sbuf;
+        }
+        draw_card_frame(0, streaming ? fps_col : RGB(51, 65, 85));
+        {
+            int x0 = 0, x1 = card_w;
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(148, 163, 184));
+            RECT hdr_rc{x0 + pad_x, Scale(6, dpi), x1 - Scale(64, dpi), Scale(23, dpi)};
+            DrawTextW(mem_dc, L"🎞 即時幀率", -1, &hdr_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            RECT spk_rc{x1 - Scale(60, dpi), Scale(6, dpi), x1 - Scale(8, dpi), Scale(23, dpi)};
+            DrawSparklineGdi(mem_dc, spk_rc, fps_history_, 65.0, fps_col);
+
+            SelectObject(mem_dc, font_metric_);
+            SetTextColor(mem_dc, fps_col);
+            RECT val_rc{x0 + pad_x, Scale(23, dpi), x1 - pad_x, Scale(50, dpi)};
+            DrawTextW(mem_dc, fps_val.c_str(), -1, &val_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(130, 145, 168));
+            RECT sub_rc{x0 + pad_x, Scale(50, dpi), x1 - Scale(6, dpi), h - Scale(3, dpi)};
+            DrawTextW(mem_dc, fps_sub.c_str(), -1, &sub_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+
+        // --- Card 1: Real-time Bitrate Mbps + Sparkline ---
+        COLORREF mbps_col = streaming ? RGB(52, 211, 153) : RGB(100, 116, 139);
+        std::wstring mbps_val = L"--.- Mbps";
+        std::wstring mbps_sub = L"USB 動態高畫質 H.264";
+        if (s.waiting_first_frame) {
+            mbps_val = L"0.0 Mbps";
+            mbps_sub = L"握手協調串流通道中";
+        } else if (streaming) {
+            wchar_t vbuf[48] = {0};
+            std::swprintf(vbuf, 48, L"%.1f Mbps", s.bitrate_mbps);
+            mbps_val = vbuf;
+            std::wstring tot_str = FormatBytesCompactWide(s.total_video_bytes);
+            wchar_t sbuf[96] = {0};
+            std::swprintf(sbuf, 96, L"峰值 %.1fM ｜ 累計 %ls", s.peak_bitrate_mbps, tot_str.c_str());
+            mbps_sub = sbuf;
+        }
+        draw_card_frame(1, streaming ? mbps_col : RGB(51, 65, 85));
+        {
+            int x0 = card_w, x1 = card_w * 2;
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(148, 163, 184));
+            RECT hdr_rc{x0 + pad_x, Scale(6, dpi), x1 - Scale(64, dpi), Scale(23, dpi)};
+            DrawTextW(mem_dc, L"📡 傳輸碼率", -1, &hdr_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            RECT spk_rc{x1 - Scale(60, dpi), Scale(6, dpi), x1 - Scale(8, dpi), Scale(23, dpi)};
+            double spk_max = std::max(12.0, s.peak_bitrate_mbps * 1.15);
+            DrawSparklineGdi(mem_dc, spk_rc, mbps_history_, spk_max, RGB(52, 211, 153));
+
+            SelectObject(mem_dc, font_metric_);
+            SetTextColor(mem_dc, mbps_col);
+            RECT val_rc{x0 + pad_x, Scale(23, dpi), x1 - pad_x, Scale(50, dpi)};
+            DrawTextW(mem_dc, mbps_val.c_str(), -1, &val_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(130, 145, 168));
+            RECT sub_rc{x0 + pad_x, Scale(50, dpi), x1 - Scale(6, dpi), h - Scale(3, dpi)};
+            DrawTextW(mem_dc, mbps_sub.c_str(), -1, &sub_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+
+        // --- Card 2: Decode & Pipeline Latency (ms) + Engine Pill ---
+        COLORREF lat_col = RGB(100, 116, 139);
+        std::wstring lat_val = L"--.- ms";
+        std::wstring lat_sub = L"H.264 解碼 + 畫布處理";
+        if (streaming) {
+            wchar_t vbuf[48] = {0};
+            std::swprintf(vbuf, 48, L"%.1f ms", s.pipeline_latency_ms);
+            lat_val = vbuf;
+            if (s.pipeline_latency_ms <= 6.5) {
+                lat_col = RGB(74, 222, 128);
+            } else if (s.pipeline_latency_ms <= 14.0) {
+                lat_col = RGB(251, 191, 36);
+            } else {
+                lat_col = RGB(248, 113, 113);
+            }
+            int budget_pct = std::clamp(static_cast<int>(s.pipeline_latency_ms * 100.0 / 16.667 + 0.5), 1, 999);
+            wchar_t sbuf[96] = {0};
+            std::swprintf(sbuf, 96, L"純解碼 %.1fms ｜ 60幀預算 %d%%", s.decode_latency_ms, budget_pct);
+            lat_sub = sbuf;
+        }
+        draw_card_frame(2, streaming ? lat_col : RGB(51, 65, 85));
+        {
+            int x0 = card_w * 2, x1 = card_w * 3;
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(148, 163, 184));
+            RECT hdr_rc{x0 + pad_x, Scale(6, dpi), x1 - Scale(66, dpi), Scale(23, dpi)};
+            DrawTextW(mem_dc, L"⚡ 解碼延遲", -1, &hdr_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            if (streaming) {
+                const wchar_t* eng_txt = s.mock_source ? L"自測" : (s.hw_accelerated ? L"D3D11VA" : L"CPU軟解");
+                COLORREF pill_bg = s.mock_source
+                                       ? RGB(14, 58, 78)
+                                       : (s.hw_accelerated ? RGB(14, 68, 44) : RGB(84, 52, 12));
+                COLORREF pill_fg = s.mock_source
+                                       ? RGB(125, 211, 252)
+                                       : (s.hw_accelerated ? RGB(110, 231, 183) : RGB(253, 211, 77));
+                RECT pill_rc{x1 - Scale(64, dpi), Scale(6, dpi), x1 - Scale(8, dpi), Scale(23, dpi)};
+                HBRUSH pb = CreateSolidBrush(pill_bg);
+                FillRect(mem_dc, &pill_rc, pb);
+                DeleteObject(pb);
+                SetTextColor(mem_dc, pill_fg);
+                DrawTextW(mem_dc, eng_txt, -1, &pill_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            SelectObject(mem_dc, font_metric_);
+            SetTextColor(mem_dc, lat_col);
+            RECT val_rc{x0 + pad_x, Scale(23, dpi), x1 - pad_x, Scale(50, dpi)};
+            DrawTextW(mem_dc, lat_val.c_str(), -1, &val_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(130, 145, 168));
+            RECT sub_rc{x0 + pad_x, Scale(50, dpi), x1 - Scale(6, dpi), h - Scale(3, dpi)};
+            DrawTextW(mem_dc, lat_sub.c_str(), -1, &sub_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+
+        // --- Card 3: Overall Stream Health Grade, Fault Alert & Click-to-Diagnose ---
+        COLORREF grd_col = RGB(148, 163, 184);
+        std::wstring grd_val = L"⚪ 待機未啟動";
+        std::wstring grd_sub = L"點擊開啟 8 項環境自檢與報錯";
+        switch (s.grade) {
+            case StreamHealthGrade::Excellent:
+                grd_col = RGB(74, 222, 128);
+                grd_val = s.mock_source ? L"🟢 極佳 (自測)" : L"🟢 極佳 · 低延遲";
+                break;
+            case StreamHealthGrade::StaticVfr:
+                grd_col = RGB(45, 212, 191);
+                grd_val = L"🔵 靜態省電 VFR";
+                break;
+            case StreamHealthGrade::Warning:
+                grd_col = RGB(251, 191, 36);
+                grd_val = (s.pipeline_latency_ms > 14.0 || s.decode_latency_ms > 12.0)
+                              ? L"🟡 解碼負載偏高"
+                              : L"🟡 幀率/頻寬受限";
+                break;
+            case StreamHealthGrade::WaitingStream:
+                grd_col = RGB(251, 191, 36);
+                grd_val = L"⏳ 等待手機訊號";
+                grd_sub = L"請解鎖手機並點信任電腦";
+                break;
+            case StreamHealthGrade::Idle:
+            default:
+                break;
+        }
+        if (streaming) {
+            if (s.grade == StreamHealthGrade::StaticVfr) {
+                grd_sub = L"畫面靜止自動降頻 (滑動即60幀)";
+            } else if (s.grade == StreamHealthGrade::Warning && !s.hw_accelerated) {
+                grd_sub = L"建議勾選開啟 D3D11VA 硬解";
+            } else {
+                wchar_t sbuf[96] = {0};
+                std::swprintf(
+                    sbuf,
+                    96,
+                    L"%u×%u ｜ 音訊 %llu 包",
+                    s.frame_width,
+                    s.frame_height,
+                    static_cast<unsigned long long>(s.total_audio_packets));
+                grd_sub = sbuf;
+            }
+        }
+
+        bool highlight_fault_on_card = false;
+        if (!recent_faults_.empty()) {
+            const auto& latest_f = recent_faults_.back();
+            bool stream_runtime_fault =
+                (latest_f.code == DiagCode::E402_GpuFallbackToSoftware ||
+                 latest_f.code == DiagCode::E403_HighDecodeLatency ||
+                 latest_f.code == DiagCode::E501_AudioEndpointLost ||
+                 latest_f.code == DiagCode::E504_DeviceAudioUnsupported);
+            if (!streaming || stream_runtime_fault || latest_f.severity >= DiagSeverity::Error) {
+                highlight_fault_on_card = true;
+                const auto& fspec = LookupDiagSpec(latest_f.code);
+                grd_col = (latest_f.severity >= DiagSeverity::Error)
+                              ? RGB(248, 113, 113)
+                              : RGB(251, 191, 36);
+                grd_val = ((latest_f.severity >= DiagSeverity::Error) ? L"❌ 錯誤 " : L"⚠️ 異常 ") +
+                          Utf8ToWide(fspec.code_str);
+                grd_sub = L"點擊開啟診斷中心查看解法";
+            }
+        }
+
+        draw_card_frame(3, (s.active || highlight_fault_on_card) ? grd_col : RGB(51, 65, 85));
+        {
+            int x0 = card_w * 3, x1 = w;
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(148, 163, 184));
+            RECT hdr_rc{x0 + pad_x, Scale(6, dpi), x1 - pad_x, Scale(23, dpi)};
+            DrawTextW(mem_dc, L"🩺 健康度診斷 (點擊自檢)", -1, &hdr_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, font_bold_);
+            SetTextColor(mem_dc, grd_col);
+            RECT val_rc{x0 + pad_x, Scale(24, dpi), x1 - Scale(6, dpi), Scale(49, dpi)};
+            DrawTextW(mem_dc, grd_val.c_str(), -1, &val_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, font_small_);
+            SetTextColor(mem_dc, RGB(130, 145, 168));
+            RECT sub_rc{x0 + pad_x, Scale(50, dpi), x1 - Scale(6, dpi), h - Scale(3, dpi)};
+            DrawTextW(mem_dc, grd_sub.c_str(), -1, &sub_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+
+        HBRUSH border_br = CreateSolidBrush(RGB(36, 68, 52));
+        FrameRect(mem_dc, &local_rc, border_br);
+        DeleteObject(border_br);
+
+        SelectObject(mem_dc, old_font);
+        BitBlt(dst_hdc, telemetry_rect_.left, telemetry_rect_.top, w, h, mem_dc, 0, 0, SRCCOPY);
+        SelectObject(mem_dc, old_bmp);
+        DeleteObject(mem_bmp);
+        DeleteDC(mem_dc);
+    }
+
+    RECT GetTelemetryDiagCardRect() const {
+        int w = telemetry_rect_.right - telemetry_rect_.left;
+        return RECT{
+            telemetry_rect_.left + (w * 3 / 4),
+            telemetry_rect_.top,
+            telemetry_rect_.right,
+            telemetry_rect_.bottom,
+        };
+    }
+
+    void PaintInlinePreview(HDC hdc) {
+        std::wstring badge;
+        bool is_toast = false;
+        if (!inline_toast_text_.empty() && GetTickCount64() < inline_toast_until_ms_) {
+            badge = inline_toast_text_;
+            is_toast = true;
+        } else if (inline_preview_enabled_ && inline_has_frame_ && inline_src_w_ > 0 && inline_src_h_ > 0) {
+            if (telem_snap_.active && !telem_snap_.waiting_first_frame) {
+                wchar_t bbuf[96] = {0};
+                std::swprintf(
+                    bbuf,
+                    96,
+                    L"● LIVE %u×%u · %.0ffps · %.1fms",
+                    inline_src_w_,
+                    inline_src_h_,
+                    telem_snap_.fps,
+                    telem_snap_.pipeline_latency_ms);
+                badge = bbuf;
+            } else {
+                badge = L"● LIVE " + std::to_wstring(inline_src_w_) + L"×" + std::to_wstring(inline_src_h_);
+            }
+        }
+
+        std::wstring idle_title = inline_preview_enabled_
+                                      ? L"🎬 低負載即時預覽待命中"
+                                      : L"⏸ 已暫停內建預覽（0% 額外負載）";
+        std::wstring idle_sub = inline_preview_enabled_
+                                    ? L"啟動投影後自動顯示（雙擊畫面開啟大視窗）"
+                                    : L"OBS 虛擬擷取卡與「📸 原畫質截圖」仍正常運作";
+
+        DrawPreviewCanvasGdi(
+            hdc,
+            preview_rect_,
+            inline_preview_enabled_ && inline_has_frame_,
+            inline_bgra_,
+            inline_fit_w_,
+            inline_fit_h_,
+            true,
+            badge,
+            is_toast,
+            idle_title,
+            idle_sub,
+            font_bold_,
+            font_normal_);
+    }
+
+    void TakeFullResolutionScreenshot(HWND source_hwnd) {
+        if (!preview_shm_.IsOpen()) {
+            preview_shm_.Open(kDefaultShmName);
+        }
+
+        std::vector<uint8_t> full_bgra;
+        uint32_t w = 0, h = 0;
+        if (!preview_shm_.CaptureLatestFullResBGRA32(full_bgra, w, h)) {
+            AppendLogLine(L"[截圖提示] 目前尚無擷取畫面，請先點擊「🚀 智慧一鍵啟動」或「🧪 免手機自測」後再截圖。");
+            if (live_monitor_ && source_hwnd == live_monitor_->Hwnd()) {
+                live_monitor_->ShowToast(L"⚠️ 尚無投影訊號可截圖，請先啟動投影", 2200);
+            } else {
+                ShowInlineToast(L"⚠️ 尚無投影訊號可截圖", 2200);
+            }
+            return;
+        }
+
+        std::filesystem::path dir = GetDefaultScreenshotDirectory(base_dir_);
+        std::filesystem::path png_path = BuildTimestampedScreenshotPath(dir, w, h);
+
+        std::string err;
+        bool png_ok = SaveTopDownBGRA32AsPng(full_bgra.data(), w, h, png_path, &err);
+        HWND clip_owner = (source_hwnd && IsWindow(source_hwnd)) ? source_hwnd : hwnd_;
+        bool clip_ok = CopyTopDownBGRA32ToClipboard(clip_owner, full_bgra.data(), w, h);
+
+        if (png_ok) {
+            std::wstring toast = L"📸 已截圖 " + std::to_wstring(w) + L"×" + std::to_wstring(h) +
+                                 (clip_ok ? L" (PNG + 已複製剪貼簿)" : L" (已存 PNG)");
+            ShowInlineToast(toast, 2500);
+            if (live_monitor_ && live_monitor_->IsOpen()) {
+                live_monitor_->ShowToast(toast, 2500);
+            }
+            AppendLogLine(
+                L"[原畫質截圖] 📸 已儲存 1:1 無損 PNG (" + std::to_wstring(w) + L"×" + std::to_wstring(h) + L")" +
+                (clip_ok ? L" 並複製至剪貼簿 (可直接 Ctrl+V 貼上)" : L"") + L"：" + png_path.wstring());
+        } else {
+            AppendLogLine(L"[截圖失敗] 無法寫入 PNG 檔案：" + Utf8ToWide(err));
+            ShowInlineToast(L"❌ 截圖儲存失敗", 2500);
+            if (live_monitor_ && live_monitor_->IsOpen()) {
+                live_monitor_->ShowToast(L"❌ 截圖儲存失敗", 2500);
+            }
+        }
+    }
+
+    void OpenScreenshotsFolder() {
+        std::filesystem::path dir = GetDefaultScreenshotDirectory(base_dir_);
+        ShellExecuteW(hwnd_, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        ControlCenterWindow* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = static_cast<ControlCenterWindow*>(cs->lpCreateParams);
+            self->hwnd_ = hwnd;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<ControlCenterWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        }
+        return self ? self->WndProc(msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+        switch (msg) {
+            case WM_CREATE:
+                BuildControls();
+                return 0;
+
+            case WM_PAINT: {
+                PAINTSTRUCT ps{};
+                HDC hdc = BeginPaint(hwnd_, &ps);
+                PaintStatusBanner(hdc);
+                PaintTelemetryDashboard(hdc);
+                PaintInlinePreview(hdc);
+                EndPaint(hwnd_, &ps);
+                return 0;
+            }
+
+            case WM_SETCURSOR: {
+                if (reinterpret_cast<HWND>(wParam) == hwnd_ && LOWORD(lParam) == HTCLIENT) {
+                    POINT pt{};
+                    RECT diag_rc = GetTelemetryDiagCardRect();
+                    if (GetCursorPos(&pt) && ScreenToClient(hwnd_, &pt) &&
+                        (PtInRect(&preview_rect_, pt) || PtInRect(&diag_rc, pt))) {
+                        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                        return TRUE;
+                    }
+                }
+                break;
+            }
+
+            case WM_LBUTTONDOWN: {
+                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                RECT diag_rc = GetTelemetryDiagCardRect();
+                if (PtInRect(&diag_rc, pt)) {
+                    OpenDiagnosticsModal();
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_LBUTTONDBLCLK: {
+                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                if (PtInRect(&preview_rect_, pt) && live_monitor_) {
+                    live_monitor_->ShowOrActivate(GetSystemDpiSafe(hwnd_));
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_CTLCOLORSTATIC: {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                HWND ctrl = reinterpret_cast<HWND>(lParam);
+                if (ctrl != edit_log_) {
+                    SetBkMode(hdc, TRANSPARENT);
+                    return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+                }
+                break;
+            }
+
+            case WM_TIMER:
+                if (wParam == kTimerRefreshId) {
+                    RefreshHealthAndUi(false);
+                } else if (wParam == kTimerStartupUpdateId) {
+                    KillTimer(hwnd_, kTimerStartupUpdateId);
+                    if (!host_running_.load(std::memory_order_acquire)) {
+                        StartAsyncUpdateCheck(false);
+                    }
+                } else if (wParam == kTimerPreviewId) {
+                    TickInlinePreview(false);
+                } else if (wParam == kTimerTelemetryId) {
+                    TickTelemetryDashboard(false);
+                }
+                return 0;
+
+            case WM_DEVICECHANGE:
+                if (wParam == DBT_DEVNODES_CHANGED) {
+                    RefreshHealthAndUi(true);
+                }
+                return TRUE;
+
+            case WM_COMMAND: {
+                int id = LOWORD(wParam);
+                int code = HIWORD(wParam);
+                if (code == CBN_SELCHANGE && id == kIdComboResMode) {
+                    user_manually_picked_res_ = true;
+                    return 0;
+                }
+                if (code == BN_CLICKED) {
+                    if (id == kIdChkInlinePreview) {
+                        inline_preview_enabled_ =
+                            (SendMessageW(chk_inline_preview_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                        inline_force_refresh_ = true;
+                        TickInlinePreview(true);
+                        InvalidateRect(hwnd_, &preview_rect_, FALSE);
+                        return 0;
+                    }
+                    if (id == kIdBtnPopoutMonitor) {
+                        if (live_monitor_) {
+                            live_monitor_->ShowOrActivate(GetSystemDpiSafe(hwnd_));
+                        }
+                        return 0;
+                    }
+                    if (id == kIdBtnScreenshot) {
+                        TakeFullResolutionScreenshot(hwnd_);
+                        return 0;
+                    }
+                    if (id == kIdBtnOpenScreenshots) {
+                        OpenScreenshotsFolder();
+                        return 0;
+                    }
+                    if (id == kIdBtnSmartStart) {
+                        if (host_running_.load(std::memory_order_acquire)) {
+                            AppendLogLine(L"[操作] 正在停止投影擷取並恢復標準 USB 模式...");
+                            StopHostProcess();
+                            AppendLogLine(L"[完成] 已停止投影擷取。");
+                        } else {
+                            StartHostProcess(false);
+                        }
+                        return 0;
+                    }
+                    if (id == kIdBtnMockTest) {
+                        if (host_running_.load(std::memory_order_acquire)) {
+                            StopHostProcess();
+                            AppendLogLine(L"[完成] 已停止自測訊號。");
+                        } else {
+                            StartHostProcess(true);
+                        }
+                        return 0;
+                    }
+                    if (id == kIdBtnRepairDriver) {
+                        RunDriverSetupElevated(L"--install");
+                        return 0;
+                    }
+                    if (id == kIdBtnDiagnostics) {
+                        OpenDiagnosticsModal();
+                        return 0;
+                    }
+                    if (id == kIdBtnOpenApk) {
+                        OpenCompanionApkFolder();
+                        return 0;
+                    }
+                    if (id == kIdBtnCopyObsGuide) {
+                        ShowAndCopyObsGuide();
+                        return 0;
+                    }
+                    if (id == kIdBtnCheckUpdate) {
+                        if (cached_update_.update_available) {
+                            OpenUpdateDialog(cached_update_);
+                        } else {
+                            StartAsyncUpdateCheck(true);
+                        }
+                        return 0;
+                    }
+                    if (id == kIdBtnUninstall) {
+                        if (MessageBoxW(
+                                hwnd_,
+                                L"確定要停止內建 ADB 服務並反註冊 TJCap for Android 虛擬擷取卡嗎？",
+                                L"確認解除安裝",
+                                MB_ICONQUESTION | MB_YESNO) == IDYES) {
+                            if (host_running_.load(std::memory_order_acquire)) {
+                                StopHostProcess();
+                            }
+                            if (RunDriverSetupElevated(L"--uninstall")) {
+                                AppendLogLine(L"[完成] 已完整停止內建 ADB 服務並移除虛擬擷取卡註冊。");
+                            }
+                        }
+                        return 0;
+                    }
+                }
+                break;
+            }
+
+            case kWmAppendLog: {
+                auto* str = reinterpret_cast<std::wstring*>(lParam);
+                if (str) {
+                    AppendLogLine(*str);
+                    delete str;
+                }
+                return 0;
+            }
+
+            case kWmHostDiagEvent: {
+                auto* ev = reinterpret_cast<ParsedDiagEvent*>(lParam);
+                if (ev) {
+                    if (ev->severity == DiagSeverity::Critical) {
+                        session_critical_fault_seen_ = true;
+                    }
+                    RecordDiagnosticFault(ev->code, ev->severity, Utf8ToWide(ev->detail_utf8), false);
+                    delete ev;
+                }
+                return 0;
+            }
+
+            case kWmHostExited: {
+                uint32_t exit_code = static_cast<uint32_t>(wParam);
+                bool manual_stop = (lParam != 0);
+                if (host_running_.load(std::memory_order_acquire)) {
+                    StopHostProcess();
+                    AppendLogLine(L"[狀態] 擷取背景程序已結束。");
+                }
+                if (!manual_stop && !shutting_down_.load(std::memory_order_acquire) && exit_code != 0) {
+                    if (!session_critical_fault_seen_) {
+                        RecordDiagnosticFault(
+                            DiagCode::E503_HostUnexpectedExit,
+                            DiagSeverity::Critical,
+                            Utf8ToWide(DescribeProcessExitCode(exit_code)),
+                            true);
+                    } else {
+                        OpenDiagnosticsModal();
+                    }
+                }
+                return 0;
+            }
+
+            case kWmUpdateCheckDone: {
+                auto* res = reinterpret_cast<UpdateCheckResult*>(lParam);
+                if (res) {
+                    OnUpdateCheckCompleted(wParam != 0, *res);
+                    delete res;
+                }
+                return 0;
+            }
+
+            case WM_CLOSE:
+                shutting_down_.store(true, std::memory_order_release);
+                KillTimer(hwnd_, kTimerRefreshId);
+                KillTimer(hwnd_, kTimerStartupUpdateId);
+                KillTimer(hwnd_, kTimerPreviewId);
+                KillTimer(hwnd_, kTimerTelemetryId);
+                if (live_monitor_) {
+                    live_monitor_->CloseMonitor();
+                }
+                preview_shm_.Close();
+                telemetry_shm_.Close();
+                if (host_running_.load(std::memory_order_acquire)) {
+                    StopHostProcess();
+                }
+                if (update_check_thread_.joinable()) {
+                    update_check_thread_.join();
+                }
+                DestroyWindow(hwnd_);
+                return 0;
+
+            case WM_DESTROY:
+                if (font_normal_) DeleteObject(font_normal_);
+                if (font_bold_) DeleteObject(font_bold_);
+                if (font_title_) DeleteObject(font_title_);
+                if (font_mono_) DeleteObject(font_mono_);
+                if (font_metric_) DeleteObject(font_metric_);
+                if (font_small_) DeleteObject(font_small_);
+                if (icon_big_) DestroyIcon(icon_big_);
+                if (icon_small_) DestroyIcon(icon_small_);
+                if (icon_banner_) DestroyIcon(icon_banner_);
+                PostQuitMessage(0);
+                return 0;
+        }
+        return DefWindowProcW(hwnd_, msg, wParam, lParam);
+    }
+
+    HINSTANCE hinst_ = nullptr;
+    HWND hwnd_ = nullptr;
+    std::filesystem::path base_dir_;
+    SystemHealth health_;
+    AndroidUsbState prev_android_usb_ = AndroidUsbState::Unplugged;
+    uint64_t last_adb_probe_ms_ = 0;
+    UsbLinkSpeed detected_usb_speed_ = UsbLinkSpeed::Unknown;
+    bool user_manually_picked_res_ = false;
+    std::vector<ResOptionSpec> res_options_;
+
+    HICON icon_big_ = nullptr;
+    HICON icon_small_ = nullptr;
+    HICON icon_banner_ = nullptr;
+
+    RECT banner_rect_{};
+    RECT telemetry_rect_{};
+    RECT preview_rect_{};
+    HWND combo_conn_mode_ = nullptr;
+    HWND btn_open_apk_ = nullptr;
+    HWND combo_res_mode_ = nullptr;
+    HWND combo_status_bar_ = nullptr;
+    HWND combo_audio_ = nullptr;
+    HWND chk_hw_decode_ = nullptr;
+    HWND chk_inline_preview_ = nullptr;
+    HWND btn_smart_start_ = nullptr;
+    HWND btn_mock_ = nullptr;
+    HWND btn_repair_ = nullptr;
+    HWND btn_diagnostics_ = nullptr;
+    HWND btn_obs_guide_ = nullptr;
+    HWND btn_update_ = nullptr;
+    HWND btn_uninstall_ = nullptr;
+    HWND btn_popout_monitor_ = nullptr;
+    HWND btn_screenshot_ = nullptr;
+    HWND btn_open_shots_ = nullptr;
+    HWND edit_log_ = nullptr;
+
+    HFONT font_normal_ = nullptr;
+    HFONT font_bold_ = nullptr;
+    HFONT font_title_ = nullptr;
+    HFONT font_mono_ = nullptr;
+    HFONT font_metric_ = nullptr;
+    HFONT font_small_ = nullptr;
+
+    std::vector<std::wstring> audio_endpoint_matches_;
+    std::vector<DiagEventRecord> recent_faults_;
+    bool session_critical_fault_seen_ = false;
+
+    SharedCaptureConsumer telemetry_shm_;
+    StreamHealthSnapshot telem_snap_{};
+    std::vector<double> fps_history_;
+    std::vector<double> mbps_history_;
+
+    SharedCaptureConsumer preview_shm_;
+    bool inline_preview_enabled_ = true;
+    bool inline_force_refresh_ = true;
+    bool inline_has_frame_ = false;
+    uint64_t inline_last_seq_ = 0;
+    uint32_t inline_fit_w_ = 0;
+    uint32_t inline_fit_h_ = 0;
+    uint32_t inline_src_w_ = 0;
+    uint32_t inline_src_h_ = 0;
+    uint32_t inline_bitrate_kbps_ = 0;
+    std::vector<uint8_t> inline_bgra_;
+    std::wstring inline_toast_text_;
+    uint64_t inline_toast_until_ms_ = 0;
+    std::unique_ptr<LiveMonitorWindow> live_monitor_;
+
+    std::mutex proc_mtx_;
+    HANDLE host_process_ = nullptr;
+    HANDLE host_stop_event_ = nullptr;
+    std::atomic<bool> host_running_{false};
+    std::atomic<bool> user_stopping_host_{false};
+    bool running_mock_ = false;
+    std::thread log_reader_thread_;
+
+    std::atomic<bool> checking_update_{false};
+    std::atomic<bool> shutting_down_{false};
+    UpdateCheckResult cached_update_;
+    std::thread update_check_thread_;
+};
+
+}  // namespace
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    SetDllDirectoryW(L"");
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    if (u32) {
+        using SetDpiCtxFn = BOOL(WINAPI*)(HANDLE);
+        auto fn = reinterpret_cast<SetDpiCtxFn>(GetProcAddress(u32, "SetProcessDpiAwarenessContext"));
+        if (fn) {
+            fn(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)));
+        }
+    }
+
+    INITCOMMONCONTROLSEX icc{};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_PROGRESS_CLASS;
+    InitCommonControlsEx(&icc);
+
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    ControlCenterWindow app;
+    if (!app.Create(hInstance, nCmdShow)) {
+        CoUninitialize();
+        return 1;
+    }
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        HWND active_wnd = GetActiveWindow();
+        if (active_wnd == app.Hwnd() && IsWindowEnabled(app.Hwnd()) &&
+            msg.message == WM_KEYDOWN && msg.wParam == VK_F12) {
+            app.TriggerScreenshotFromHotkey();
+            continue;
+        }
+        if (active_wnd != nullptr && active_wnd == app.LiveMonitorHwnd()) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            continue;
+        }
+        if (!IsDialogMessageW(active_wnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    CoUninitialize();
+    return static_cast<int>(msg.wParam);
+}

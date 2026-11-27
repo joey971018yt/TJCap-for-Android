@@ -1,0 +1,11 @@
+build/
+build-*/
+release-msvc-win64/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db

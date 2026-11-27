@@ -1,0 +1,37 @@
+#include <winver.h>
+#include "../../include/android_vcam/app_resource.h"
+
+IDI_APP_MAIN_ICON ICON "../../assets/app_icon.ico"
+
+#ifdef ANDROID_VCAM_EMBED_RC_MANIFEST
+1 24 "android_vcam_gui.manifest"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION ANDROID_VCAM_VER_MAJOR,ANDROID_VCAM_VER_MINOR,ANDROID_VCAM_VER_PATCH,ANDROID_VCAM_VER_BUILD
+ PRODUCTVERSION ANDROID_VCAM_VER_MAJOR,ANDROID_VCAM_VER_MINOR,ANDROID_VCAM_VER_PATCH,ANDROID_VCAM_VER_BUILD
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "CompanyName", "TJCap Project"
+            VALUE "FileDescription", "TJCap for Android (USB Speed Adaptive 2K+ Capture App)"
+            VALUE "FileVersion", ANDROID_VCAM_VER_STR
+            VALUE "InternalName", "TJCapForAndroid"
+            VALUE "LegalCopyright", "Copyright (C) 2026 TJCap Project"
+            VALUE "OriginalFilename", "TJCap for Android.exe"
+            VALUE "ProductName", "TJCap for Android"
+            VALUE "ProductVersion", ANDROID_VCAM_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0404, 1200
+    END
+END
