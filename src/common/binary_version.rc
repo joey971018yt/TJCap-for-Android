@@ -1,0 +1,31 @@
+#include <winver.h>
+#include "../../include/android_vcam/app_resource.h"
+
+IDI_APP_MAIN_ICON ICON "../../assets/app_icon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION ANDROID_VCAM_VER_MAJOR,ANDROID_VCAM_VER_MINOR,ANDROID_VCAM_VER_PATCH,ANDROID_VCAM_VER_BUILD
+ PRODUCTVERSION ANDROID_VCAM_VER_MAJOR,ANDROID_VCAM_VER_MINOR,ANDROID_VCAM_VER_PATCH,ANDROID_VCAM_VER_BUILD
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "CompanyName", "JCast Project"
+            VALUE "FileDescription", "JCast for Android Core Engine"
+            VALUE "FileVersion", ANDROID_VCAM_VER_STR
+            VALUE "LegalCopyright", "Copyright (C) 2026 JCast Project"
+            VALUE "ProductName", "JCast for Android"
+            VALUE "ProductVersion", ANDROID_VCAM_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0404, 1200
+    END
+END
