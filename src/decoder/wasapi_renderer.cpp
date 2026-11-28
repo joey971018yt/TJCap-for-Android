@@ -116,14 +116,25 @@ std::vector<AudioEndpointInfo> WasapiAudioRouter::EnumerateRenderEndpoints() {
 bool WasapiAudioRouter::StartAutoRoute(const std::string& shm_name, const std::string& target_name_substring) {
     Stop();
 #ifdef _WIN32
+    const std::string needle = ToLowerAscii(target_name_substring);
+
+    // "__default__" / "default": follow the current Windows default playback device and
+    // automatically re-route when it changes (e.g. plugging in headphones / Bluetooth).
+    if (needle == "__default__" || needle == "default") {
+        active_endpoint_name_ = "Windows 預設播放裝置";
+        stop_requested_.store(false, std::memory_order_release);
+        running_.store(true, std::memory_order_release);
+        worker_ = std::thread(&WasapiAudioRouter::WorkerLoop, this, shm_name, std::wstring());
+        return true;
+    }
+
     auto endpoints = EnumerateRenderEndpoints();
     if (endpoints.empty()) {
         return false;
     }
 
     const AudioEndpointInfo* chosen = nullptr;
-    if (!target_name_substring.empty()) {
-        std::string needle = ToLowerAscii(target_name_substring);
+    if (!needle.empty()) {
         for (const auto& ep : endpoints) {
             if (ToLowerAscii(ep.friendly_name_utf8).find(needle) != std::string::npos) {
                 chosen = &ep;
@@ -167,26 +178,48 @@ void WasapiAudioRouter::Stop() {
     active_endpoint_name_.clear();
 }
 
+#ifdef _WIN32
+namespace {
+
+std::wstring QueryDefaultRenderId(IMMDeviceEnumerator* enumerator) {
+    std::wstring out;
+    IMMDevice* dev = nullptr;
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &dev)) && dev) {
+        LPWSTR id = nullptr;
+        if (SUCCEEDED(dev->GetId(&id)) && id) {
+            out = id;
+            CoTaskMemFree(id);
+        }
+        dev->Release();
+    }
+    return out;
+}
+
+std::string QueryFriendlyName(IMMDevice* dev) {
+    std::string friendly;
+    IPropertyStore* props = nullptr;
+    if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props)) && props) {
+        PROPVARIANT pv;
+        PropVariantInit(&pv);
+        if (SUCCEEDED(props->GetValue(kPkeyDeviceFriendlyName, &pv)) && pv.vt == VT_LPWSTR) {
+            friendly = WideToUtf8(pv.pwszVal);
+        }
+        PropVariantClear(&pv);
+        props->Release();
+    }
+    return friendly;
+}
+
+}  // namespace
+#endif
+
 void WasapiAudioRouter::WorkerLoop(std::string shm_name, std::wstring device_id) {
 #ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+    const bool follow_default = device_id.empty();
     IMMDeviceEnumerator* enumerator = nullptr;
-    IMMDevice* device = nullptr;
-    IAudioClient* audio_client = nullptr;
-    IAudioRenderClient* render_client = nullptr;
     HANDLE event_handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-
-    auto cleanup = [&]() {
-        if (audio_client) audio_client->Stop();
-        if (render_client) render_client->Release();
-        if (audio_client) audio_client->Release();
-        if (device) device->Release();
-        if (enumerator) enumerator->Release();
-        if (event_handle) CloseHandle(event_handle);
-        running_.store(false, std::memory_order_release);
-        CoUninitialize();
-    };
 
     if (!event_handle ||
         FAILED(CoCreateInstance(
@@ -196,100 +229,140 @@ void WasapiAudioRouter::WorkerLoop(std::string shm_name, std::wstring device_id)
             __uuidof(IMMDeviceEnumerator),
             reinterpret_cast<void**>(&enumerator))) ||
         !enumerator) {
-        cleanup();
+        if (event_handle) CloseHandle(event_handle);
+        running_.store(false, std::memory_order_release);
+        CoUninitialize();
         return;
     }
-
-    if (FAILED(enumerator->GetDevice(device_id.c_str(), &device)) || !device) {
-        cleanup();
-        return;
-    }
-
-    if (FAILED(device->Activate(
-            __uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&audio_client))) ||
-        !audio_client) {
-        cleanup();
-        return;
-    }
-
-    // Request 48000 Hz 16-bit Stereo PCM with Windows automatic mixer SRC/format conversion if needed
-    WAVEFORMATEX wfx{};
-    wfx.wFormatTag = WAVE_FORMAT_PCM;
-    wfx.nChannels = 2;
-    wfx.nSamplesPerSec = 48000;
-    wfx.wBitsPerSample = 16;
-    wfx.nBlockAlign = 4;
-    wfx.nAvgBytesPerSec = 48000 * 4;
-
-    DWORD stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-    // 20ms buffer (200,000 100ns units)
-    HRESULT hr = audio_client->Initialize(
-        AUDCLNT_SHAREMODE_SHARED, stream_flags, 200000, 0, &wfx, nullptr);
-    if (FAILED(hr)) {
-        cleanup();
-        return;
-    }
-
-    if (FAILED(audio_client->SetEventHandle(event_handle)) ||
-        FAILED(audio_client->GetService(
-            __uuidof(IAudioRenderClient), reinterpret_cast<void**>(&render_client))) ||
-        !render_client) {
-        cleanup();
-        return;
-    }
-
-    UINT32 buffer_frames = 0;
-    audio_client->GetBufferSize(&buffer_frames);
 
     SharedCaptureConsumer consumer;
     consumer.Open(shm_name);
 
-    if (FAILED(audio_client->Start())) {
-        cleanup();
-        return;
-    }
+    auto sleep_interruptible = [&](int ms) {
+        for (int t = 0; t < ms && !stop_requested_.load(std::memory_order_relaxed); t += 50) {
+            Sleep(50);
+        }
+    };
 
+    // Outer loop: (re)open the endpoint. Handles headphone plug/unplug, Bluetooth reconnects,
+    // default-device switches and AUDCLNT_E_DEVICE_INVALIDATED without stopping the router.
     while (!stop_requested_.load(std::memory_order_relaxed)) {
-        DWORD wait_rc = WaitForSingleObject(event_handle, 50);
-        if (stop_requested_.load(std::memory_order_relaxed)) {
-            break;
-        }
-        if (wait_rc != WAIT_OBJECT_0 && wait_rc != WAIT_TIMEOUT) {
-            break;
+        IMMDevice* device = nullptr;
+        IAudioClient* audio_client = nullptr;
+        IAudioRenderClient* render_client = nullptr;
+        std::wstring current_id = follow_default ? QueryDefaultRenderId(enumerator) : device_id;
+
+        auto release_device = [&]() {
+            if (audio_client) audio_client->Stop();
+            if (render_client) render_client->Release();
+            if (audio_client) audio_client->Release();
+            if (device) device->Release();
+            render_client = nullptr;
+            audio_client = nullptr;
+            device = nullptr;
+        };
+
+        if (current_id.empty() ||
+            FAILED(enumerator->GetDevice(current_id.c_str(), &device)) || !device ||
+            FAILED(device->Activate(
+                __uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&audio_client))) ||
+            !audio_client) {
+            release_device();
+            sleep_interruptible(500);
+            continue;
         }
 
-        if (!consumer.IsOpen()) {
-            consumer.Open(shm_name);
+        std::string friendly = QueryFriendlyName(device);
+        if (!friendly.empty()) {
+            active_endpoint_name_ = friendly;
         }
 
-        UINT32 padding = 0;
-        HRESULT pad_hr = audio_client->GetCurrentPadding(&padding);
-        if (FAILED(pad_hr)) {
-            if (!stop_requested_.load(std::memory_order_relaxed)) {
+        // Request 48000 Hz 16-bit Stereo PCM with Windows automatic mixer SRC/format conversion if needed
+        WAVEFORMATEX wfx{};
+        wfx.wFormatTag = WAVE_FORMAT_PCM;
+        wfx.nChannels = 2;
+        wfx.nSamplesPerSec = 48000;
+        wfx.wBitsPerSample = 16;
+        wfx.nBlockAlign = 4;
+        wfx.nAvgBytesPerSec = 48000 * 4;
+
+        DWORD stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                             AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                             AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        // 20ms buffer (200,000 100ns units)
+        UINT32 buffer_frames = 0;
+        if (FAILED(audio_client->Initialize(
+                AUDCLNT_SHAREMODE_SHARED, stream_flags, 200000, 0, &wfx, nullptr)) ||
+            FAILED(audio_client->SetEventHandle(event_handle)) ||
+            FAILED(audio_client->GetService(
+                __uuidof(IAudioRenderClient), reinterpret_cast<void**>(&render_client))) ||
+            !render_client ||
+            FAILED(audio_client->GetBufferSize(&buffer_frames)) ||
+            FAILED(audio_client->Start())) {
+            release_device();
+            sleep_interruptible(500);
+            continue;
+        }
+
+        std::cout << "[Audio] 電腦端監聽輸出 -> \"" << active_endpoint_name_ << "\"\n";
+
+        ULONGLONG last_default_check = GetTickCount64();
+        while (!stop_requested_.load(std::memory_order_relaxed)) {
+            DWORD wait_rc = WaitForSingleObject(event_handle, 50);
+            if (stop_requested_.load(std::memory_order_relaxed)) {
+                break;
+            }
+            if (wait_rc != WAIT_OBJECT_0 && wait_rc != WAIT_TIMEOUT) {
+                break;
+            }
+
+            if (follow_default) {
+                ULONGLONG now = GetTickCount64();
+                if (now - last_default_check >= 500ULL) {
+                    last_default_check = now;
+                    std::wstring def_id = QueryDefaultRenderId(enumerator);
+                    if (!def_id.empty() && def_id != current_id) {
+                        break;  // Windows default output changed (e.g. headphones plugged in) -> re-route
+                    }
+                }
+            }
+
+            if (!consumer.IsOpen()) {
+                consumer.Open(shm_name);
+            }
+
+            UINT32 padding = 0;
+            if (FAILED(audio_client->GetCurrentPadding(&padding))) {
                 std::cout << FormatHostDiagLine(
                                  DiagCode::E501_AudioEndpointLost,
                                  DiagSeverity::Warning,
                                  "電腦端監聽音訊裝置 \"" + active_endpoint_name_ +
-                                     "\" 已中斷或拔除（OBS 內的 TJCap for Android (Audio) 仍正常運作）。")
+                                     "\" 已中斷或拔除，正在自動重新連線（OBS 內的 TJCap for Android (Audio) 仍正常運作）。")
                           << "\n";
+                break;
             }
-            break;
-        }
-        UINT32 avail_frames = (buffer_frames > padding) ? (buffer_frames - padding) : 0;
-        if (avail_frames == 0) {
-            continue;
+            UINT32 avail_frames = (buffer_frames > padding) ? (buffer_frames - padding) : 0;
+            if (avail_frames == 0) {
+                continue;
+            }
+
+            BYTE* data = nullptr;
+            if (SUCCEEDED(render_client->GetBuffer(avail_frames, &data)) && data) {
+                consumer.ReadAudioPcmS16LE(reinterpret_cast<int16_t*>(data), avail_frames);
+                render_client->ReleaseBuffer(avail_frames, 0);
+            }
         }
 
-        BYTE* data = nullptr;
-        if (SUCCEEDED(render_client->GetBuffer(avail_frames, &data)) && data) {
-            consumer.ReadAudioPcmS16LE(reinterpret_cast<int16_t*>(data), avail_frames);
-            render_client->ReleaseBuffer(avail_frames, 0);
+        release_device();
+        if (!stop_requested_.load(std::memory_order_relaxed)) {
+            sleep_interruptible(300);
         }
     }
 
-    cleanup();
+    enumerator->Release();
+    CloseHandle(event_handle);
+    running_.store(false, std::memory_order_release);
+    CoUninitialize();
 #else
     (void)shm_name;
     (void)device_id;

@@ -2690,6 +2690,10 @@ private:
                      reinterpret_cast<LPARAM>(L"僅輸出至 OBS「TJCap for Android (Audio)」（不在電腦喇叭播放）"));
         audio_endpoint_matches_.push_back(L"__NONE__");
 
+        SendMessageW(combo_audio_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"🎧 電腦監聽：跟隨 Windows 預設播放裝置（插拔耳機自動切換）"));
+        audio_endpoint_matches_.push_back(L"__DEFAULT__");
+
         auto eps = WasapiAudioRouter::EnumerateRenderEndpoints();
         for (const auto& ep : eps) {
             std::wstring wname = Utf8ToWide(ep.friendly_name_utf8);
@@ -2697,7 +2701,17 @@ private:
             SendMessageW(combo_audio_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
             audio_endpoint_matches_.push_back(wname);
         }
-        SendMessageW(combo_audio_, CB_SETCURSEL, 0, 0);
+        // Without VB-Audio Virtual Cable the "auto" route plays nothing on the PC, so default to
+        // following the Windows default output (speakers / headphones) for local monitoring.
+        bool has_vb_cable = false;
+        for (const auto& ep : eps) {
+            std::wstring low = Utf8ToWide(ep.friendly_name_utf8);
+            for (auto& c : low) c = static_cast<wchar_t>(towlower(c));
+            if (low.find(L"cable input") != std::wstring::npos || low.find(L"vb-audio") != std::wstring::npos) {
+                has_vb_cable = true;
+            }
+        }
+        SendMessageW(combo_audio_, CB_SETCURSEL, has_vb_cable ? 0 : 2, 0);
     }
 
     void AppendLogLine(const std::wstring& line) {

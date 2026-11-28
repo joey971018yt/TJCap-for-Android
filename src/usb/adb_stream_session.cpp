@@ -374,7 +374,10 @@ bool AdbStreamSession::ConnectAndStart(
         L" scid=" + Utf8ToWideLocal(scid_hex) +
         L" log_level=info tunnel_forward=true video=true audio=" + (request_audio ? L"true" : L"false") +
         L" control=false stay_awake=false power_off_on_close=false cleanup=true"
-        L" video_codec=h264 audio_codec=raw"
+        L" video_codec=h264 audio_codec=raw" +
+        // Android 13+: capture via "playback" source with audio_dup so the phone keeps playing
+        // sound locally instead of being muted while streaming (Android 11/12 cannot duplicate).
+        std::wstring(request_audio && impl_->android_sdk >= 33 ? L" audio_source=playback audio_dup=true" : L"") +
         L" max_size=" + std::to_wstring(cfg.max_size) +
         L" max_fps=" + std::to_wstring(cfg.max_fps) +
         L" video_bit_rate=" + std::to_wstring(cfg.video_bit_rate) +
