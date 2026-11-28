@@ -7,7 +7,7 @@
 <p align="center">
   <b>Windows 10 / 11 專用 — Android 手機／平板 USB-C 雙模免 Root 2K+ 60/120fps 虛擬擷取卡 App</b><br/>
   免實體擷取卡 · 免 Root · 預設免裝手機 App 直連（USB 偵錯）＋ 內附免開 USB 偵錯備援（TJCap Companion APK + USB AOA）<br/>
-  USB 速率智慧辨識 · 四欄式即時健康度儀表板 · 獨立全螢幕預覽 (`F11`) · 原畫質無損截圖 (`F12`) · 智慧故障診斷與自動更新
+  USB 速率智慧辨識 · 四欄式即時健康度儀表板 · 獨立全螢幕預覽 (`F11`) · 原畫質無損截圖 (`F12`) · 智慧故障診斷與自動更新 ，支援繁體中文&英文
 </p>
 
 <p align="center">
