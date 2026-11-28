@@ -54,7 +54,7 @@ jobs:
             Copy-Item "companion\*" "release-msvc-win64\companion\"
           }
 
-          # Create clean Portable App ZIP (TJCap-for-Android-Portable-v1.0.0.zip)
+          # Create clean Portable App ZIP (TJCap-for-Android-Portable-v1.0.1.zip)
           New-Item -ItemType Directory -Force -Path "build-installer\TJCap-for-Android" | Out-Null
           Copy-Item "release-msvc-win64\TJCap for Android.exe" "build-installer\TJCap-for-Android\"
           Copy-Item "release-msvc-win64\android_vcam_gui.exe" "build-installer\TJCap-for-Android\"
@@ -69,7 +69,7 @@ jobs:
           Copy-Item -Recurse "release-msvc-win64\runtime" "build-installer\TJCap-for-Android\runtime"
           Copy-Item -Recurse "release-msvc-win64\drivers" "build-installer\TJCap-for-Android\drivers"
           Copy-Item -Recurse "release-msvc-win64\companion" "build-installer\TJCap-for-Android\companion"
-          Compress-Archive -Path "build-installer\TJCap-for-Android" -DestinationPath "build-installer\TJCap-for-Android-Portable-v1.0.0.zip" -Force
+          Compress-Archive -Path "build-installer\TJCap-for-Android" -DestinationPath "build-installer\TJCap-for-Android-Portable-v1.0.1.zip" -Force
 
       - name: Build Windows App Setup.exe via Inno Setup 6
         shell: pwsh
@@ -90,18 +90,23 @@ jobs:
           name: tjcap-for-android-app-packages
           path: |
             release-msvc-win64/
-            build-installer/TJCap-for-Android-Setup-v1.0.0.exe
-            build-installer/TJCap-for-Android-Portable-v1.0.0.zip
+            build-installer/TJCap-for-Android-Setup-v1.0.1.exe
+            build-installer/TJCap-for-Android-Portable-v1.0.1.zip
             companion/TJCap-Companion-v1.0.0.apk
 
-      - name: Publish TJCap for Android Setup.exe, Portable.zip & Companion.apk to GitHub Release v1.0.0
+      - name: Publish TJCap for Android Setup.exe, Portable.zip & Companion.apk to GitHub Release v1.0.1
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $notes = @"
-          ## 🟢 TJCap for Android v1.0.0 — 免實體擷取卡 × 免 Root 雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 App
+          ## 🟢 TJCap for Android v1.0.1 — 免實體擷取卡 × 免 Root 雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 App
+
+          ### 🆕 v1.0.1 更新內容
+          - **🎧 新增「跟隨 Windows 預設播放裝置」電腦監聽選項**：修正螢幕喇叭有聲音、耳機沒聲音，插拔耳機／藍牙自動切換。
+          - **🔁 音訊裝置斷線自動重連**（`TJCAP-E501`）。
+          - **📱 Android 13+ 串流時手機不再被靜音**（手機與電腦同時出聲；Android 11／12 受系統限制仍會靜音）。
 
           ### ✨ 核心亮點
           - **⚡ 雙模免 Root USB-C 有線擷取架構**：
@@ -114,25 +119,25 @@ jobs:
           ---
 
           ### 📦 下載檔案說明
-          1. **推薦下載：`TJCap-for-Android-Setup-v1.0.0.exe`（Windows 正式安裝版 App，已內含 Companion APK）**
-          2. **免安裝選擇：`TJCap-for-Android-Portable-v1.0.0.zip`（Windows 綠色便攜版 App，已內含 Companion APK）**
+          1. **推薦下載：`TJCap-for-Android-Setup-v1.0.1.exe`（Windows 正式安裝版 App，已內含 Companion APK）**
+          2. **免安裝選擇：`TJCap-for-Android-Portable-v1.0.1.zip`（Windows 綠色便攜版 App，已內含 Companion APK）**
           3. **手機端選用備援包：`TJCap-Companion-v1.0.0.apk`（僅在選擇「免開 USB 偵錯 AOA 備援模式」時需安裝於手機）**
           "@
-          gh release view v1.0.0 >$null 2>&1
+          gh release view v1.0.1 >$null 2>&1
           if ($LASTEXITCODE -eq 0) {
-            gh release edit v1.0.0 `
-              --title "TJCap for Android v1.0.0 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
+            gh release edit v1.0.1 `
+              --title "TJCap for Android v1.0.1 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
               --notes $notes
-            gh release upload v1.0.0 `
-              "build-installer\TJCap-for-Android-Setup-v1.0.0.exe" `
-              "build-installer\TJCap-for-Android-Portable-v1.0.0.zip" `
+            gh release upload v1.0.1 `
+              "build-installer\TJCap-for-Android-Setup-v1.0.1.exe" `
+              "build-installer\TJCap-for-Android-Portable-v1.0.1.zip" `
               "companion\TJCap-Companion-v1.0.0.apk" `
               --clobber
           } else {
-            gh release create v1.0.0 `
-              "build-installer\TJCap-for-Android-Setup-v1.0.0.exe" `
-              "build-installer\TJCap-for-Android-Portable-v1.0.0.zip" `
+            gh release create v1.0.1 `
+              "build-installer\TJCap-for-Android-Setup-v1.0.1.exe" `
+              "build-installer\TJCap-for-Android-Portable-v1.0.1.zip" `
               "companion\TJCap-Companion-v1.0.0.apk" `
-              --title "TJCap for Android v1.0.0 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
+              --title "TJCap for Android v1.0.1 (免Root雙模 USB-C 2K+ 60/120fps 虛擬擷取卡 × Companion AOA 備援)" `
               --notes $notes
           }

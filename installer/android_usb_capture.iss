@@ -1,8 +1,8 @@
 [Setup]
 AppId={{9F85B3C1-6D2A-4E94-AB52-3E7D9E81F299}
 AppName=TJCap for Android
-AppVersion=1.0.0
-AppVerName=TJCap for Android v1.0.0
+AppVersion=1.0.1
+AppVerName=TJCap for Android v1.0.1
 AppPublisher=TJCap Project
 AppPublisherURL=https://github.com/joey971018yt/TJCap-for-Android
 DefaultDirName={autopf}\TJCap for Android
@@ -17,7 +17,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 OutputDir=..\build-installer
-OutputBaseFilename=TJCap-for-Android-Setup-v1.0.0
+OutputBaseFilename=TJCap-for-Android-Setup-v1.0.1
 CloseApplications=yes
 
 [Tasks]

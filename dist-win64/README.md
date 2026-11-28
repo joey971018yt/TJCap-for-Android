@@ -2,7 +2,7 @@
   <img src="assets/app_icon.png" width="112" alt="TJCap for Android App Icon" />
 </p>
 
-<h1 align="center">TJCap for Android v1.0.0</h1>
+<h1 align="center">TJCap for Android v1.0.1</h1>
 
 <p align="center">
   <b>Windows 10 / 11 專用 — Android 手機／平板 USB-C 雙模免 Root 2K+ 60/120fps 虛擬擷取卡 App</b><br/>
@@ -30,11 +30,11 @@
 
 請直接前往本專案右側的 **[Releases（發布頁面）](../../releases/latest)** 下載最新版本：
 
-1. **📦 正式安裝版 App（最推薦）：`TJCap-for-Android-Setup-v1.0.0.exe`**
+1. **📦 正式安裝版 App（最推薦）：`TJCap-for-Android-Setup-v1.0.1.exe`**
    - 雙擊執行安裝精靈，自動在**桌面**與**開始選單**建立帶有翠綠專屬圖示的 **「TJCap for Android」** App。
    - 自動完成 DirectShow 雙路虛擬擷取卡（`TJCap for Android (Video)` / `(Audio)`）與內建 ADB／AOA 驅動服務註冊（獨立 CLSID，可與 iOS 版虛擬擷取卡同時並存！）。
    - 內建 **GitHub Releases 自動更新**：日後有新版時，點 App 內 **`⬆️ 升級`** 即可自動驗算 `SHA-256` 並一鍵升級。
-2. **📁 免安裝綠色便攜版 App：`TJCap-for-Android-Portable-v1.0.0.zip`**
+2. **📁 免安裝綠色便攜版 App：`TJCap-for-Android-Portable-v1.0.1.zip`**
    - **重要**：請先右鍵「全部解壓縮」至獨立資料夾（切勿直接在 ZIP 壓縮檔內點開），再雙擊資料夾內的 **`TJCap for Android.exe`** 即可使用（首次啟動會自動請求管理員權限註冊虛擬擷取卡，同樣支援便攜版一鍵自動更新）。
 3. **📲 手機端備援安裝包：`TJCap-Companion-v1.0.0.apk`** *(已同步內附於電腦端程式的 `companion\` 資料夾中)*
    - **一般使用者免安裝！** 只有在您要使用「🛡️ 免開 USB 偵錯備援模式 (AOA)」時才需要傳至手機安裝。

@@ -1,5 +1,14 @@
 # TJCap for Android — 版本更新日誌 (Changelog)
 
+## `v1.0.1` (2026-11-28) — 音訊修正更新
+* **🎧 電腦端監聽：新增「跟隨 Windows 預設播放裝置」**：
+  * 音訊輸出選單新增「🎧 電腦監聽：跟隨 Windows 預設播放裝置（插拔耳機自動切換）」，未安裝 VB-Audio Virtual Cable 時自動預設此選項。
+  * 修正「螢幕喇叭有聲音、耳機沒聲音」：切換到耳機或藍牙耳機後，約 0.5 秒內自動改從新裝置播放。
+* **🔁 音訊裝置斷線自動重連**：耳機拔除、藍牙斷線或裝置失效 (`TJCAP-E501`) 時自動重新連線，不再整段失去聲音。
+* **📱 Android 13+ 手機不再被靜音**：ADB 直連模式在 Android 13 以上改用 `audio_source=playback` + `audio_dup=true`，串流時手機與電腦同時出聲。
+  * 註：Android 11／12 受系統限制，串流期間手機仍會靜音；禁止錄音的 App（部分遊戲／影音 App）在 Android 13+ 可能無法擷取聲音。
+* Companion APK 無變更，維持 `TJCap-Companion-v1.0.0.apk`。
+
 ## `v1.0.0` (2026-11-27) — 初版正式發布
 * **🟢 雙模免 Root Android USB-C 有線擷取引擎**：
   * **模式一（預設推薦 — 免裝手機 App 直連）**：內建免外部設定之獨立 `ADB` 與硬體編碼微服務 (`tjcap-server.jar`)，免 Root、免手動安裝 APK、小米/Redmi 免開安全設定，支援最高 **2K+/4K (`3840p`) @ `60 / 120 FPS` H.264** 畫面與 **Android 11+ 全系統 `48kHz` 立體聲內錄音訊**。
