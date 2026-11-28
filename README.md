@@ -10,6 +10,12 @@
   USB 速率智慧辨識 · 四欄式即時健康度儀表板 · 獨立全螢幕預覽 (`F11`) · 原畫質無損截圖 (`F12`) · 智慧故障診斷與自動更新
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-10B981.svg" alt="License: Apache-2.0" /></a>
+  <a href="https://github.com/joey971018yt/TJCap-for-Android/releases"><img src="https://img.shields.io/github/v/release/joey971018yt/TJCap-for-Android?color=10B981" alt="Latest Release" /></a>
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-10B981.svg" alt="PRs Welcome" /></a>
+</p>
+
 ---
 
 ## 目錄
@@ -191,4 +197,5 @@
 - **Windows 10/11 原生編譯 (Visual Studio 2022 MSVC x64)**：執行 `scripts\build_windows.bat`
 - **TJCap Companion Android APK 編譯 (Android SDK Build-Tools 35)**：執行 `companion-apk/build_apk.sh`
 - **版本更新紀錄**：請參閱 [CHANGELOG.md](CHANGELOG.md)
-- **第三方開源授權聲明**：請參閱 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+- **開源授權條款**：本專案採用 [Apache License 2.0](LICENSE) 開源釋出（第三方元件授權詳見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）
+- **參與貢獻與社群規範**：請參閱 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md) 與 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
